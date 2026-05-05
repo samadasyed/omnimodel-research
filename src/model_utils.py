@@ -1,29 +1,35 @@
-"""Model wrappers with a common interface.
+"""Model wrappers with a uniform `.generate()` interface.
 
 Each wrapper exposes:
-    .generate(prompt, video_path=None, audio_path=None) -> ResponseDict
 
-ResponseDict = {
-    "text": str,                          # decoded model text output
-    "answer_logprobs": dict | None,       # softmax over " A"," B"," C"," D" tokens
-                                          # at the position right after "[ANSWER] "
-    "metadata": dict,
-}
+    .generate(
+        prompt: str,
+        video_path: Optional[str] = None,
+        audio_path: Optional[str] = None,
+        use_audio_in_video: bool = False,
+        max_new_tokens: int = 64,
+    ) -> ResponseDict
 
-The logprob signal is captured by appending "[ANSWER] " to the prompt and
-running a single forward pass to score the next token. This is simpler and
-more deterministic than scraping `output_scores` mid-generation. We do a
-separate generation pass for the verbalized answer + confidence + attribution.
+ResponseDict has:
+    text:               decoded model text (post-prompt)
+    answer_logprobs:    {"A": p, "B": p, "C": p, "D": p} or None (optional)
+    metadata:           extra info (model class name, etc.)
 
-Implementation notes:
-- These wrappers are written for HuggingFace `transformers >= 4.45`.
-- Qwen2.5-Omni requires `qwen-omni-utils` to process video/audio inputs.
-- All wrappers default to greedy decoding (do_sample=False) for reproducibility.
+Wrappers
+--------
+    TextOnlyModelWrapper   — small text LLM for S1 baseline (Qwen2.5-1.5B-Instruct)
+    Gemma3nWrapper         — primary omnimodal: Gemma-3n-E2B-IT (text+image+audio)
+    QwenOmniWrapper        — alternative omnimodal: Qwen2.5-Omni-7B (cross-model)
 
-If running in Colab and the API doesn't match (Qwen2.5-Omni is new and its
-processor signature has shifted across releases), check the model card at
-https://huggingface.co/Qwen/Qwen2.5-Omni-7B and adjust ONLY the
-``_build_inputs`` method on each wrapper.
+Gemma-3n's vision pipeline is image-based, so we sample N frames from
+videos and pass them as a list of PIL images. Audio is handled directly
+by the processor as numpy float32 mono @ 16kHz.
+
+Caveats:
+- Gemma-3n is image-text-to-text; "video" support = N sampled frames.
+- Audio length cap on Gemma-3n is roughly 30 seconds. Longer audio is
+  truncated to the first 30s by default; configurable via `audio_max_s`.
+- We default to greedy (do_sample=False) for reproducibility.
 """
 
 from __future__ import annotations
@@ -33,9 +39,6 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 
-# Tokens we score for logprob-based confidence.
-# We add a leading space because most BPE/sentencepiece tokenizers put a
-# leading space on the first content token after a prompt.
 CHOICE_TOKENS = {
     "A": [" A", "A"],
     "B": [" B", "B"],
@@ -47,17 +50,13 @@ CHOICE_TOKENS = {
 @dataclass
 class ResponseDict:
     text: str
-    answer_logprobs: Optional[Dict[str, float]] = None  # {"A": p, ...} normalized over A/B/C/D
+    answer_logprobs: Optional[Dict[str, float]] = None
     metadata: Dict = field(default_factory=dict)
 
 
 def _softmax_over_choices(scores: Dict[str, float]) -> Dict[str, float]:
-    """Renormalize raw token logprobs (sums of token probs) to a distribution
-    over A/B/C/D only. We use logsumexp for stability.
-    """
     if not scores:
         return {}
-    # scores are log-probs; convert to probs and renormalize
     max_lp = max(scores.values())
     exps = {k: math.exp(v - max_lp) for k, v in scores.items()}
     total = sum(exps.values())
@@ -66,69 +65,128 @@ def _softmax_over_choices(scores: Dict[str, float]) -> Dict[str, float]:
     return {k: v / total for k, v in exps.items()}
 
 
+# ─── Audio + frame helpers ─────────────────────────────────────────
+def _load_audio_array(audio_path: str, target_sr: int = 16000,
+                       max_seconds: Optional[float] = None):
+    """Load audio as float32 mono numpy array at target_sr.
+
+    soundfile + simple linear resample if rate differs. Truncates to
+    max_seconds when supplied.
+    """
+    import numpy as np
+    import soundfile as sf
+
+    data, sr = sf.read(audio_path, dtype="float32", always_2d=False)
+    if data.ndim > 1:
+        data = data.mean(axis=1)
+    if sr != target_sr:
+        # Cheap linear resample; for AVUT diagnostic eval this is good enough.
+        ratio = target_sr / sr
+        new_len = int(len(data) * ratio)
+        x_old = np.linspace(0.0, 1.0, num=len(data), endpoint=False)
+        x_new = np.linspace(0.0, 1.0, num=new_len, endpoint=False)
+        data = np.interp(x_new, x_old, data).astype("float32")
+        sr = target_sr
+    if max_seconds is not None:
+        data = data[: int(max_seconds * sr)]
+    return data, sr
+
+
+def _sample_video_frames(video_path: str, num_frames: int = 8):
+    """Sample evenly-spaced frames from a video as a list of PIL Images.
+
+    Uses imageio.v3 (ffmpeg-based) for portability; works on Colab.
+    """
+    import numpy as np
+    from PIL import Image
+    import imageio.v3 as iio
+
+    # Read all frames lazily; for short AVUT clips this is cheap.
+    # For longer videos, we'd want a proper time-based sampler.
+    frames = []
+    metadata = iio.immeta(video_path, plugin="pyav")
+    duration = metadata.get("duration")
+    fps = metadata.get("fps")
+    total_frames = int(duration * fps) if (duration and fps) else None
+
+    if total_frames and total_frames > 0:
+        # Evenly spaced indices
+        idxs = np.linspace(0, total_frames - 1, num=num_frames).astype(int).tolist()
+        # Read one frame per index
+        for idx in idxs:
+            try:
+                arr = iio.imread(video_path, index=idx, plugin="pyav")
+                frames.append(Image.fromarray(arr))
+            except Exception:
+                continue
+
+    if not frames:
+        # Fallback: read up to num_frames from the start
+        for i, arr in enumerate(iio.imiter(video_path, plugin="pyav")):
+            frames.append(Image.fromarray(arr))
+            if len(frames) >= num_frames:
+                break
+
+    return frames or [Image.new("RGB", (224, 224))]
+
+
 # ────────────────────────────────────────────────────────────────────
-# Text-only wrapper (S0)
+# Text-only wrapper (S1 baseline)
 # ────────────────────────────────────────────────────────────────────
 class TextOnlyModelWrapper:
-    """Qwen2.5-1.5B-Instruct text-only baseline."""
+    """Small text-only LLM. Default Qwen2.5-1.5B-Instruct (matches Jeff's S1)."""
 
-    def __init__(self, model_name: str = "Qwen/Qwen2.5-1.5B-Instruct", device: str = "cuda", dtype=None):
+    def __init__(self, model_name: str = "Qwen/Qwen2.5-1.5B-Instruct",
+                 device: str = "cuda", dtype=None):
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
-
         self.device = device
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
             torch_dtype=dtype or torch.bfloat16,
             device_map="auto",
-            trust_remote_code=True,
         )
         self.model.eval()
+        self.model_name = model_name
 
     def generate(
         self,
         prompt: str,
         max_new_tokens: int = 64,
-        capture_choice_logprobs: bool = True,
-        **kwargs,  # absorb video_path/audio_path so call signature matches
+        capture_choice_logprobs: bool = False,
+        **_unused,
     ) -> ResponseDict:
         import torch
-
         messages = [{"role": "user", "content": prompt}]
-        chat_text = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
+        text = self.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True,
         )
-        inputs = self.tokenizer(chat_text, return_tensors="pt").to(self.device)
-
+        inputs = self.tokenizer(text, return_tensors="pt").to(self.model.device)
         with torch.no_grad():
-            out_ids = self.model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=False,
-                temperature=1.0,
+            out = self.model.generate(
+                **inputs, max_new_tokens=max_new_tokens, do_sample=False,
                 pad_token_id=self.tokenizer.eos_token_id,
             )
-        gen = self.tokenizer.decode(
-            out_ids[0, inputs.input_ids.shape[1]:], skip_special_tokens=True
+        response = self.tokenizer.decode(
+            out[0, inputs.input_ids.shape[1]:], skip_special_tokens=True,
         ).strip()
 
         choice_lp = None
         if capture_choice_logprobs:
-            choice_lp = self._score_choices(chat_text)
+            choice_lp = self._score_choices(text)
+        return ResponseDict(
+            text=response, answer_logprobs=choice_lp,
+            metadata={"model_name": self.model_name},
+        )
 
-        return ResponseDict(text=gen, answer_logprobs=choice_lp)
-
-    def _score_choices(self, chat_text_prompt: str) -> Dict[str, float]:
-        """Append '[ANSWER] ' to the prompt, do a forward pass, read next-token logprobs."""
+    def _score_choices(self, prompt_text: str) -> Dict[str, float]:
         import torch
-
-        scoring_prompt = chat_text_prompt + "[ANSWER]"
-        ids = self.tokenizer(scoring_prompt, return_tensors="pt").to(self.device)
+        scoring = prompt_text + "[ANSWER]"
+        ids = self.tokenizer(scoring, return_tensors="pt").to(self.model.device)
         with torch.no_grad():
-            logits = self.model(**ids).logits[0, -1]  # (vocab,)
+            logits = self.model(**ids).logits[0, -1]
         log_probs = torch.log_softmax(logits.float(), dim=-1)
-
         scores = {}
         for letter, variants in CHOICE_TOKENS.items():
             best = None
@@ -144,27 +202,152 @@ class TextOnlyModelWrapper:
 
 
 # ────────────────────────────────────────────────────────────────────
-# Qwen2.5-Omni wrapper (S1–S5)
+# Gemma-3n wrapper (PRIMARY omnimodal)
 # ────────────────────────────────────────────────────────────────────
-class OmniModelWrapper:
-    """Wrapper for Qwen/Qwen2.5-Omni-7B.
+class Gemma3nWrapper:
+    """Wrapper for Gemma-3n-E2B-IT (or -E4B-IT) — image+audio+text omnimodal.
 
-    The model's processor uses `qwen-omni-utils` to handle video and audio
-    inputs. The chat-template format expects messages like:
+    Vision pipeline is image-based: we sample N frames from videos.
+    Audio is loaded as float32 mono @16kHz and passed to the processor.
+
+    The chat-template content schema matches what the Gemma-3n processor
+    expects in transformers:
 
         [{"role": "user", "content": [
-            {"type": "video", "video": <path-or-url>},
-            {"type": "audio", "audio": <path-or-url>},
+            {"type": "audio", "audio": <numpy array | path>},
+            {"type": "image", "image": <PIL.Image>},
+            ...one block per sampled frame...
             {"type": "text",  "text":  <prompt>},
         ]}]
-
-    We support audio-only (S1), video-only (S2), and full AV (S3+) by
-    selectively attaching content blocks.
-
-    NOTE: the exact module/class names below are correct as of transformers
-    >= 4.45 with `Qwen2_5OmniForConditionalGeneration`. Verify against the
-    HF model card if errors arise.
     """
+
+    def __init__(
+        self,
+        model_name: str = "google/gemma-3n-E2B-it",
+        device: str = "cuda",
+        dtype=None,
+        num_video_frames: int = 8,
+        audio_max_seconds: float = 30.0,
+    ):
+        import torch
+        from transformers import AutoProcessor
+
+        self.device = device
+        self.model_name = model_name
+        self.num_video_frames = num_video_frames
+        self.audio_max_seconds = audio_max_seconds
+
+        self.processor = AutoProcessor.from_pretrained(model_name)
+
+        try:
+            from transformers import Gemma3nForConditionalGeneration as _Cls
+        except ImportError:
+            from transformers import AutoModelForImageTextToText as _Cls
+        self._cls_name = _Cls.__name__
+
+        self.model = _Cls.from_pretrained(
+            model_name,
+            torch_dtype=dtype or torch.bfloat16,
+            device_map="auto",
+        )
+        self.model.eval()
+
+    def _build_content(
+        self,
+        prompt: str,
+        video_path: Optional[str],
+        audio_path: Optional[str],
+        use_audio_in_video: bool,
+    ) -> List[Dict]:
+        content: List[Dict] = []
+
+        # Audio: a separate clip OR extracted from the video
+        if audio_path is not None:
+            audio_arr, _ = _load_audio_array(
+                audio_path, target_sr=16000, max_seconds=self.audio_max_seconds,
+            )
+            content.append({"type": "audio", "audio": audio_arr})
+        elif video_path is not None and use_audio_in_video:
+            # We need a separate audio path for Gemma; the processor doesn't
+            # extract audio from video. The caller usually supplies the
+            # pre-extracted .wav alongside the video. If not provided, skip.
+            pass
+
+        # Visual: sampled frames from video
+        if video_path is not None:
+            frames = _sample_video_frames(video_path, num_frames=self.num_video_frames)
+            for img in frames:
+                content.append({"type": "image", "image": img})
+
+        content.append({"type": "text", "text": prompt})
+        return content
+
+    def generate(
+        self,
+        prompt: str,
+        video_path: Optional[str] = None,
+        audio_path: Optional[str] = None,
+        use_audio_in_video: bool = False,
+        max_new_tokens: int = 64,
+        capture_choice_logprobs: bool = False,
+        audio_for_video_path: Optional[str] = None,
+    ) -> ResponseDict:
+        """Run one inference. ``audio_for_video_path`` lets the caller pass
+        the pre-extracted .wav for a video at the same time as the silent
+        video, so Gemma sees both modalities (since it can't pull audio
+        from an mp4 itself).
+        """
+        import torch
+
+        # If audio_for_video_path supplied, treat as the audio input
+        if audio_for_video_path is not None and audio_path is None:
+            audio_path = audio_for_video_path
+
+        content = self._build_content(prompt, video_path, audio_path, use_audio_in_video)
+        messages = [{"role": "user", "content": content}]
+
+        inputs = self.processor.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt",
+        )
+        inputs = {k: (v.to(self.model.device) if hasattr(v, "to") else v)
+                  for k, v in inputs.items()}
+
+        with torch.no_grad():
+            out_ids = self.model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+            )
+
+        prompt_len = inputs["input_ids"].shape[1]
+        gen_ids = out_ids[:, prompt_len:]
+        text = self.processor.batch_decode(gen_ids, skip_special_tokens=True)[0].strip()
+
+        return ResponseDict(
+            text=text,
+            answer_logprobs=None,  # logprob scoring on multimodal Gemma is
+                                    # finicky; skip for the primary run
+            metadata={"model_class": self._cls_name, "model_name": self.model_name},
+        )
+
+
+# ────────────────────────────────────────────────────────────────────
+# Qwen2.5-Omni wrapper (alternative omnimodal — cross-model check)
+# ────────────────────────────────────────────────────────────────────
+class QwenOmniWrapper:
+    """Wrapper for Qwen/Qwen2.5-Omni-7B. Used for the cross-model robustness
+    check and to reproduce Jeff's S1-S6 numbers in our own pipeline.
+    """
+
+    SYSTEM_PROMPT = (
+        "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, "
+        "capable of perceiving auditory and visual inputs, as well as generating "
+        "text and speech."
+    )
 
     def __init__(
         self,
@@ -173,237 +356,77 @@ class OmniModelWrapper:
         dtype=None,
     ):
         import torch
-        from transformers import AutoProcessor
+        from transformers import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniProcessor
 
         self.device = device
-        self.processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
-
-        # Try the dedicated class first; fall back to AutoModelForCausalLM if absent
-        try:
-            from transformers import Qwen2_5OmniForConditionalGeneration as _OmniCls
-        except ImportError:
-            from transformers import AutoModelForCausalLM as _OmniCls
-
-        self.model = _OmniCls.from_pretrained(
-            model_name,
-            torch_dtype=dtype or torch.bfloat16,
-            device_map="auto",
-            trust_remote_code=True,
+        self.model_name = model_name
+        self.processor = Qwen2_5OmniProcessor.from_pretrained(model_name)
+        self.model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
+            model_name, torch_dtype=dtype or torch.bfloat16, device_map="auto",
         )
+        if hasattr(self.model, "disable_talker"):
+            try:
+                self.model.disable_talker()
+            except Exception:
+                pass
         self.model.eval()
-        self._OmniCls_name = _OmniCls.__name__
-
-    def _build_messages(
-        self,
-        prompt: str,
-        video_path: Optional[str],
-        audio_path: Optional[str],
-    ) -> List[Dict]:
-        content = []
-        if video_path is not None:
-            content.append({"type": "video", "video": video_path})
-        if audio_path is not None:
-            content.append({"type": "audio", "audio": audio_path})
-        content.append({"type": "text", "text": prompt})
-        return [{"role": "user", "content": content}]
-
-    def _build_inputs(self, messages: List[Dict]):
-        """Apply chat template + run the processor over media and text.
-
-        Uses qwen_omni_utils.process_mm_info if available (preferred path,
-        gives the model time-aligned tokens). Falls back to passing paths
-        directly to the processor.
-        """
-        try:
-            from qwen_omni_utils import process_mm_info
-            text = self.processor.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
-            audios, images, videos = process_mm_info(messages, use_audio_in_video=True)
-            inputs = self.processor(
-                text=text,
-                audio=audios,
-                images=images,
-                videos=videos,
-                return_tensors="pt",
-                padding=True,
-                use_audio_in_video=True,
-            )
-        except ImportError:
-            text = self.processor.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
-            inputs = self.processor(text=text, return_tensors="pt", padding=True)
-
-        return inputs.to(self.device)
 
     def generate(
         self,
         prompt: str,
         video_path: Optional[str] = None,
         audio_path: Optional[str] = None,
-        max_new_tokens: int = 256,
-        capture_choice_logprobs: bool = True,
+        use_audio_in_video: bool = False,
+        max_new_tokens: int = 64,
+        max_pixels: int = 360 * 420,
+        fps: float = 1.0,
+        **_unused,
     ) -> ResponseDict:
         import torch
+        from qwen_omni_utils import process_mm_info
 
-        messages = self._build_messages(prompt, video_path, audio_path)
-        inputs = self._build_inputs(messages)
+        user_content = []
+        if video_path is not None:
+            user_content.append({
+                "type": "video", "video": str(video_path),
+                "max_pixels": max_pixels, "fps": fps,
+            })
+        if audio_path is not None:
+            user_content.append({"type": "audio", "audio": str(audio_path)})
+        user_content.append({"type": "text", "text": prompt})
+
+        conversation = [
+            {"role": "system", "content": [{"type": "text", "text": self.SYSTEM_PROMPT}]},
+            {"role": "user",   "content": user_content},
+        ]
+
+        text = self.processor.apply_chat_template(
+            conversation, add_generation_prompt=True, tokenize=False,
+        )
+        audios, images, videos = process_mm_info(
+            conversation, use_audio_in_video=use_audio_in_video,
+        )
+        inputs = self.processor(
+            text=text, audio=audios, images=images, videos=videos,
+            return_tensors="pt", padding=True,
+            use_audio_in_video=use_audio_in_video,
+        )
+        inputs = inputs.to(self.model.device).to(self.model.dtype)
 
         with torch.no_grad():
-            out_ids = self.model.generate(
+            text_ids = self.model.generate(
                 **inputs,
+                use_audio_in_video=use_audio_in_video,
+                return_audio=False,
                 max_new_tokens=max_new_tokens,
                 do_sample=False,
-                temperature=1.0,
             )
-
-        # When inputs has input_ids of shape (1, T), strip the prompt off
-        prompt_len = inputs["input_ids"].shape[1] if "input_ids" in inputs else 0
-        gen_ids = out_ids[:, prompt_len:]
-        gen_text = self.processor.batch_decode(
-            gen_ids, skip_special_tokens=True
+        text_out = self.processor.batch_decode(
+            text_ids[:, inputs.input_ids.shape[1]:],
+            skip_special_tokens=True, clean_up_tokenization_spaces=False,
         )[0].strip()
-
-        choice_lp = None
-        if capture_choice_logprobs:
-            choice_lp = self._score_choices(messages)
 
         return ResponseDict(
-            text=gen_text,
-            answer_logprobs=choice_lp,
-            metadata={"model_class": self._OmniCls_name},
+            text=text_out, answer_logprobs=None,
+            metadata={"model_name": self.model_name},
         )
-
-    def _score_choices(self, messages: List[Dict]) -> Dict[str, float]:
-        """Score A/B/C/D by appending '[ANSWER]' to the prompt and reading
-        the next-token logits. One forward pass; no generation.
-        """
-        import torch
-
-        # Re-apply the chat template with an extra "[ANSWER]" suffix
-        prompt_text = self.processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        ) + "[ANSWER]"
-
-        try:
-            from qwen_omni_utils import process_mm_info
-            audios, images, videos = process_mm_info(messages, use_audio_in_video=True)
-            inputs = self.processor(
-                text=prompt_text,
-                audio=audios,
-                images=images,
-                videos=videos,
-                return_tensors="pt",
-                padding=True,
-                use_audio_in_video=True,
-            ).to(self.device)
-        except ImportError:
-            inputs = self.processor(text=prompt_text, return_tensors="pt", padding=True).to(self.device)
-
-        with torch.no_grad():
-            out = self.model(**inputs)
-        logits = out.logits[0, -1]
-        log_probs = torch.log_softmax(logits.float(), dim=-1)
-
-        # Use the processor's tokenizer to find token ids
-        tokenizer = getattr(self.processor, "tokenizer", None)
-        if tokenizer is None:
-            return {}
-
-        scores = {}
-        for letter, variants in CHOICE_TOKENS.items():
-            best = None
-            for tok in variants:
-                tok_ids = tokenizer.encode(tok, add_special_tokens=False)
-                if not tok_ids:
-                    continue
-                lp = log_probs[tok_ids[0]].item()
-                if best is None or lp > best:
-                    best = lp
-            scores[letter] = best if best is not None else -1e9
-        return _softmax_over_choices(scores)
-
-
-# ────────────────────────────────────────────────────────────────────
-# Gemma-3n wrapper (cross-model comparison)
-# ────────────────────────────────────────────────────────────────────
-class GemmaOmniWrapper:
-    """Gemma-3n-E2B-IT cross-model comparison.
-
-    Gemma-3n is a 2B-effective omnimodal model (text + image/video + audio).
-    Smaller than Qwen2.5-Omni-7B, faster on H100. Use as a robustness check
-    on whether confabulation findings are model-specific or general.
-
-    The Gemma-3n processor in transformers >= 4.50 follows a similar
-    chat-template-with-content-blocks pattern.
-    """
-
-    def __init__(
-        self,
-        model_name: str = "google/gemma-3n-E2B-it",
-        device: str = "cuda",
-        dtype=None,
-    ):
-        import torch
-        from transformers import AutoProcessor
-
-        self.device = device
-        self.processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
-
-        try:
-            from transformers import Gemma3nForConditionalGeneration as _Cls
-        except ImportError:
-            from transformers import AutoModelForCausalLM as _Cls
-
-        self.model = _Cls.from_pretrained(
-            model_name,
-            torch_dtype=dtype or torch.bfloat16,
-            device_map="auto",
-            trust_remote_code=True,
-        )
-        self.model.eval()
-
-    def generate(
-        self,
-        prompt: str,
-        video_path: Optional[str] = None,
-        audio_path: Optional[str] = None,
-        max_new_tokens: int = 256,
-        capture_choice_logprobs: bool = True,
-    ) -> ResponseDict:
-        import torch
-
-        content = []
-        if video_path is not None:
-            content.append({"type": "video", "video": video_path})
-        if audio_path is not None:
-            content.append({"type": "audio", "audio": audio_path})
-        content.append({"type": "text", "text": prompt})
-        messages = [{"role": "user", "content": content}]
-
-        inputs = self.processor.apply_chat_template(
-            messages,
-            add_generation_prompt=True,
-            tokenize=True,
-            return_tensors="pt",
-            return_dict=True,
-        ).to(self.device)
-
-        with torch.no_grad():
-            out_ids = self.model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=False,
-                temperature=1.0,
-            )
-
-        prompt_len = inputs["input_ids"].shape[1]
-        gen_ids = out_ids[:, prompt_len:]
-        gen_text = self.processor.batch_decode(
-            gen_ids, skip_special_tokens=True
-        )[0].strip()
-
-        # Skip choice logprobs for Gemma initially — different processor wrapping;
-        # add later if cross-model logprob comparison becomes load-bearing.
-        return ResponseDict(text=gen_text, answer_logprobs=None)

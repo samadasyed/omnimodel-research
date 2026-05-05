@@ -1,106 +1,127 @@
-"""Parsing helpers for model responses.
+"""Response parsing — extracts answer letter, confidence, attribution rank, reason.
 
-Models don't always follow output formats. We try the strict format first,
-then fall back to progressively looser regex patterns. Anything still
-unparseable returns None — we never silently default, since "missing" must
-be distinguishable from "uncertain" downstream.
+Tries the strict bracketed format first ([ANSWER] X [CONFIDENCE] Y), then
+progressively falls back to looser regexes. None signals missing data; we
+never silently default, since "missing" must be distinguishable from
+"uncertain" in downstream metric computation.
+
+Multimodal models (Qwen-Omni, Gemma-3n) often drop the bracket markers
+when given audio/video — the fallback patterns catch that. Aligned with
+Jeff's parser so parse outcomes are comparable across model runs.
 """
 
 import re
-from typing import Optional, Tuple, Dict
+from typing import Dict, Optional, Tuple
 
 
-_ANS_STRICT = re.compile(r"\[ANSWER\]\s*([A-Da-d])", re.IGNORECASE)
-_CONF_STRICT = re.compile(r"\[CONFIDENCE\]\s*(\d{1,3})", re.IGNORECASE)
-_ANS_PAREN = re.compile(r"\(([A-Da-d])\)")
-_ANS_LEAD = re.compile(r"^[\s\W]*([A-Da-d])\b")
-_RANK_STRICT = re.compile(
-    r"\[RANK\]\s*Audio\s*=\s*(\d).*?Visual\s*=\s*(\d).*?Text\s*=\s*(\d)",
-    re.IGNORECASE | re.DOTALL,
-)
-_RANK_LOOSE_AUDIO = re.compile(r"[Aa]udio\s*[:=]\s*(\d)")
-_RANK_LOOSE_VISUAL = re.compile(r"[Vv]isual\s*[:=]\s*(\d)")
-_RANK_LOOSE_TEXT = re.compile(r"[Tt]ext\s*[:=]\s*(\d)")
-_REASON = re.compile(r"\[REASON\]\s*(.+?)(?:$|\n)", re.IGNORECASE | re.DOTALL)
-
-
+# ─── Answer + confidence ────────────────────────────────────────────
 def parse_answer_confidence(response: str) -> Tuple[Optional[str], Optional[int]]:
-    """Extract (letter, confidence) from a model response.
+    """Extract (answer_letter, confidence_0_to_100) from a model response.
 
-    Returns (None, None) if the response has neither, (letter, None) if
-    only the letter is recoverable, etc.
+    Recognized formats (in priority order):
+      "[ANSWER] B [CONFIDENCE] 75"   ← strict
+      "B 85" / "B. 85" / "B, 85"     ← bracket-stripped (common Gemma drift)
+      "(B) confidence: 80"           ← parenthesized
+      "The answer is C with confidence 80"
+      "B"                            ← answer only, no confidence
     """
     if not response:
         return None, None
 
-    answer = None
-    confidence = None
+    response = response.strip()
+    answer: Optional[str] = None
+    confidence: Optional[int] = None
 
-    m = _ANS_STRICT.search(response)
-    if m:
-        answer = m.group(1).upper()
+    # Strict format
+    m_ans = re.search(r"\[ANSWER\]\s*([A-Da-d])", response)
+    m_conf = re.search(r"\[CONFIDENCE\]\s*(\d{1,3})", response)
+    if m_ans:
+        answer = m_ans.group(1).upper()
+    if m_conf:
+        confidence = min(int(m_conf.group(1)), 100)
 
-    m = _CONF_STRICT.search(response)
-    if m:
-        confidence = min(int(m.group(1)), 100)
+    # Compact "B 85" / "B. 85" / "(B) 85" pattern at the start of the response
+    if answer is None or confidence is None:
+        m = re.match(r"^\s*\(?([A-Da-d])\)?\s*[.,:\-]?\s*(\d{1,3})(?:\s|$|%)", response)
+        if m:
+            if answer is None:
+                answer = m.group(1).upper()
+            if confidence is None:
+                confidence = min(int(m.group(2)), 100)
 
+    # Other answer-letter fallbacks
     if answer is None:
-        m = _ANS_PAREN.search(response)
+        m = re.search(r"answer\s+is\s*[:\-]?\s*\(?([A-Da-d])\)?", response, re.IGNORECASE)
         if m:
             answer = m.group(1).upper()
-
     if answer is None:
-        m = _ANS_LEAD.match(response.lstrip())
+        m = re.search(r"\(([A-Da-d])\)", response)
         if m:
             answer = m.group(1).upper()
+    if answer is None:
+        m = re.search(r"\b([A-D])\b", response)
+        if m:
+            answer = m.group(1)
+
+    # Other confidence fallbacks
+    if confidence is None:
+        for pat in (
+            r"confidence\s*[:=]\s*(\d{1,3})",
+            r"(\d{1,3})\s*%",
+            r"(\d{1,3})\s*(?:out of|/)\s*100",
+        ):
+            m = re.search(pat, response, re.IGNORECASE)
+            if m:
+                confidence = min(int(m.group(1)), 100)
+                break
 
     return answer, confidence
 
 
+# ─── Attribution rank (S6) ──────────────────────────────────────────
 def parse_attribution(response: str) -> Optional[Dict[str, int]]:
-    """Extract modality ranking from S3 response.
+    """Extract {'Audio': r, 'Visual': r, 'Text': r} from S6 follow-up output.
 
-    Returns a dict like {"Audio": 1, "Visual": 2, "Text": 3} or None.
+    Tries the strict '[RANK] Audio=X, Visual=Y, Text=Z' first, then a loose
+    "Audio: 1 ... Visual: 2 ... Text: 3" anywhere in the response.
     """
     if not response:
         return None
 
-    m = _RANK_STRICT.search(response)
+    m = re.search(
+        r"\[RANK\]\s*Audio\s*=\s*(\d)\s*[,;]?\s*Visual\s*=\s*(\d)\s*[,;]?\s*Text\s*=\s*(\d)",
+        response, re.IGNORECASE,
+    )
     if m:
-        return {
-            "Audio": int(m.group(1)),
-            "Visual": int(m.group(2)),
-            "Text": int(m.group(3)),
-        }
+        return {"Audio": int(m.group(1)),
+                "Visual": int(m.group(2)),
+                "Text": int(m.group(3))}
 
-    am = _RANK_LOOSE_AUDIO.search(response)
-    vm = _RANK_LOOSE_VISUAL.search(response)
-    tm = _RANK_LOOSE_TEXT.search(response)
-    if am and vm and tm:
-        return {
-            "Audio": int(am.group(1)),
-            "Visual": int(vm.group(1)),
-            "Text": int(tm.group(1)),
-        }
-
+    a = re.search(r"Audio\s*[:=]\s*(\d)",  response, re.IGNORECASE)
+    v = re.search(r"Visual\s*[:=]\s*(\d)", response, re.IGNORECASE)
+    t = re.search(r"Text\s*[:=]\s*(\d)",   response, re.IGNORECASE)
+    if a and v and t:
+        return {"Audio": int(a.group(1)),
+                "Visual": int(v.group(1)),
+                "Text": int(t.group(1))}
     return None
 
 
 def parse_reason(response: str) -> Optional[str]:
     if not response:
         return None
-    m = _REASON.search(response)
+    m = re.search(r"\[REASON\]\s*(.+?)(?=\n\n|\[|$)",
+                  response, re.IGNORECASE | re.DOTALL)
     return m.group(1).strip() if m else None
 
 
 def top_modality(attribution: Dict[str, int]) -> Optional[str]:
     """Return the modality with the lowest rank number (== most relied on).
 
-    Ties are broken by the canonical order Audio > Visual > Text — so a
-    model that says "everything tied at 1" is treated as relying on audio.
-    Document this in the paper as a methodological choice; alternative is
-    to drop ties.
+    Ties are broken in canonical order Audio > Visual > Text (so a model
+    saying "everything tied at 1" is treated as relying on audio).
     """
     if not attribution:
         return None
-    return min(attribution, key=lambda k: (attribution[k], ["Audio", "Visual", "Text"].index(k)))
+    order = ["Audio", "Visual", "Text"]
+    return min(attribution, key=lambda k: (attribution[k], order.index(k)))

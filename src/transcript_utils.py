@@ -1,16 +1,17 @@
-"""ASR transcript generation + mismatched-transcript pool construction.
+"""ASR transcripts + mismatched-transcript pool construction.
 
-The mismatched-transcript condition (S5) is the lexical-vs-acoustic conflict
+The S7 mismatched-transcript condition is the lexical-vs-acoustic conflict
 test. For each sample we need a transcript that:
-  - is a plausible-looking AVUT-style transcript (so the model doesn't
-    notice it's "off"),
-  - comes from a DIFFERENT video on the same task type (so the genre and
-    the topic distribution roughly match),
-  - is not so trivially mismatched that the answer is obviously contradicted
-    in a way that even a text-only reader would notice.
+  - looks like a plausible AVUT transcript (the model shouldn't notice
+    it's "off"),
+  - comes from a DIFFERENT video on the same task type (so genre / topic
+    distribution roughly match),
+  - is not so trivially mismatched that the answer is obviously
+    contradicted in a way a text-only reader would catch.
 
-We pair video V_i with the transcript of video V_j (j != i) chosen at random
-within the same task type. We fix the random seed so this is reproducible.
+Pairing: video V_i is paired with the transcript of V_j (j != i, same
+task_type). Random-seeded for reproducibility; identical seed → identical
+pairings across model runs (Gemma + Qwen-Omni).
 """
 
 import os
@@ -20,16 +21,17 @@ from pathlib import Path
 from typing import Dict, List
 
 
+# ─── Whisper ───────────────────────────────────────────────────────
 def transcribe_with_whisper(
     audio_path: str,
     output_dir: str,
     model_size: str = "small",
     language: str = "en",
 ) -> str:
-    """Run openai-whisper CLI on an audio file. Returns the transcript text.
+    """Transcribe an audio file using openai-whisper CLI. Cached on disk.
 
-    Notebook callers should ``pip install openai-whisper`` and ensure ffmpeg
-    is on PATH. We persist the txt to disk for caching.
+    Notebook callers should ``pip install openai-whisper`` and ensure
+    ffmpeg is on PATH.
     """
     os.makedirs(output_dir, exist_ok=True)
     base = Path(audio_path).stem
@@ -51,26 +53,49 @@ def transcribe_with_whisper(
         check=False,
         capture_output=True,
     )
-
     if os.path.exists(txt_path):
         with open(txt_path) as f:
             return f.read().strip()
     return ""
 
 
+def transcribe_with_whisper_python(
+    audio_path: str,
+    output_path: str,
+    whisper_model,   # already-loaded model object
+    language: str = "en",
+) -> str:
+    """Transcribe using an already-loaded Python whisper model. Caches to disk.
+
+    Cheaper than the CLI when transcribing many files in a row from a
+    notebook because we keep the model loaded across calls.
+    """
+    if os.path.exists(output_path):
+        with open(output_path) as f:
+            return f.read().strip()
+
+    result = whisper_model.transcribe(
+        audio_path, language=language, fp16=True, verbose=False,
+    )
+    text = (result.get("text") or "").strip()
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, "w") as f:
+        f.write(text)
+    return text
+
+
+# ─── Mismatched-transcript pairing ────────────────────────────────
 def build_mismatched_pairs(
     samples: List[Dict],
     seed: int = 42,
 ) -> Dict[int, str]:
-    """For each sample, pick a different sample of the same task type
-    whose transcript we'll inject as the mismatched transcript.
+    """Map qa_id → donor video_id whose transcript should be used as the
+    mismatched transcript.
 
-    Keying: maps qa_id (the unique identifier per sample) to the video_id
-    (YouTube ID) of the donor whose transcript should be used.
-
-    Property: the donor is from the SAME task_type, but always a different
-    underlying video. If only one sample exists for a task, it pairs with
-    itself and a warning is printed (S5 degenerates to S4 for that sample).
+    Donor is from the SAME task_type but ALWAYS a different underlying
+    video. If a task only has one video in the sample, that qa_id gets
+    paired with itself and S7 effectively degenerates to S5 — flagged
+    by a printed warning.
     """
     rng = random.Random(seed)
     by_task: Dict[str, List[Dict]] = {}
@@ -81,12 +106,12 @@ def build_mismatched_pairs(
     for s in samples:
         pool = [d for d in by_task[s["task_type"]] if d["video_id"] != s["video_id"]]
         if not pool:
-            print(f"[build_mismatched_pairs] WARNING: task={s['task_type']!r} has only "
-                  f"video {s['video_id']}; S5 degenerates to S4 for qa_id={s['qa_id']}")
+            print(f"[build_mismatched_pairs] WARN task={s['task_type']!r} "
+                  f"only has video {s['video_id']!r}; "
+                  f"S7 degenerates to S5 for qa_id={s['qa_id']}")
             pairs[s["qa_id"]] = s["video_id"]
         else:
-            donor = rng.choice(pool)
-            pairs[s["qa_id"]] = donor["video_id"]
+            pairs[s["qa_id"]] = rng.choice(pool)["video_id"]
     return pairs
 
 

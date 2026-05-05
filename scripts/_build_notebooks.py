@@ -1,20 +1,27 @@
-"""Build the six Colab notebooks for the AVUT diagnostic pipeline.
+"""Build the AVUT diagnostic notebooks (Colab-ready).
 
 Run from repo root:
     python scripts/_build_notebooks.py
 
-This file is a builder, not part of the analysis pipeline. It exists so that
-notebooks remain reviewable in git diffs (we generate them from typed cell
-lists rather than handcrafting JSON).
+Produces six notebooks:
+    01_setup_and_download.ipynb
+    02_preprocess.ipynb
+    03_pilot.ipynb
+    04_main_eval_gemma.ipynb
+    05_main_eval_qwen.ipynb
+    06_analysis.ipynb
+
+The builder pattern keeps notebooks reviewable in git (we generate them
+from typed cell lists rather than handcrafting JSON). Stage scheme
+matches Jeff's repo (jjwang8/639_avut) so cross-model numbers are
+directly comparable.
 """
 
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import List, Tuple
-
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 NOTEBOOKS_DIR = REPO_ROOT / "notebooks"
@@ -26,11 +33,7 @@ Cell = Tuple[str, str]  # (cell_type, source)
 def make_notebook(cells: List[Cell]) -> dict:
     nb_cells = []
     for cell_type, source in cells:
-        cell = {
-            "cell_type": cell_type,
-            "metadata": {},
-            "source": source,
-        }
+        cell = {"cell_type": cell_type, "metadata": {}, "source": source}
         if cell_type == "code":
             cell["execution_count"] = None
             cell["outputs"] = []
@@ -56,950 +59,752 @@ def write_nb(name: str, cells: List[Cell]) -> None:
     print(f"Wrote {path}")
 
 
+# ─── Common Colab bootstrap (used by every notebook) ─────────────
+BOOTSTRAP = '''# ─── Colab bootstrap ────────────────────────────────────────
+# Mount Drive (caches model weights + videos across sessions),
+# clone the repo, install dependencies, and configure the cache dirs.
+import os, sys, subprocess, pathlib
+
+IS_COLAB = "google.colab" in sys.modules
+
+if IS_COLAB:
+    from google.colab import drive
+    drive.mount("/content/drive")
+    DRIVE_ROOT = "/content/drive/MyDrive/avut"
+    REPO_DIR = "/content/omnimodel-research"
+    os.makedirs(DRIVE_ROOT, exist_ok=True)
+    if not os.path.exists(REPO_DIR):
+        subprocess.run([
+            "git", "clone",
+            "https://github.com/samadasyed/omnimodel-research.git",
+            REPO_DIR,
+        ], check=True)
+else:
+    DRIVE_ROOT = os.path.expanduser("~/avut")
+    REPO_DIR = str(pathlib.Path.cwd())
+    os.makedirs(DRIVE_ROOT, exist_ok=True)
+
+os.chdir(REPO_DIR)
+if REPO_DIR not in sys.path:
+    sys.path.insert(0, REPO_DIR)
+
+# Persistent storage layout (data + model caches under DRIVE_ROOT)
+DATA_DIR        = os.path.join(DRIVE_ROOT, "data")
+VIDEO_DIR       = os.path.join(DATA_DIR, "videos")
+AUDIO_DIR       = os.path.join(DATA_DIR, "audio")
+SILENT_DIR      = os.path.join(DATA_DIR, "silent")
+TRANSCRIPT_DIR  = os.path.join(DATA_DIR, "transcripts")
+ANNOTATION_DIR  = os.path.join(DATA_DIR, "annotations")
+RESULTS_DIR     = os.path.join(DRIVE_ROOT, "results")
+RAW_PRED_DIR    = os.path.join(RESULTS_DIR, "raw_predictions")
+METRICS_DIR     = os.path.join(RESULTS_DIR, "metrics")
+HF_CACHE        = os.path.join(DRIVE_ROOT, ".cache", "hf")
+WHISPER_CACHE   = os.path.join(DRIVE_ROOT, ".cache", "whisper")
+
+for d in [VIDEO_DIR, AUDIO_DIR, SILENT_DIR, TRANSCRIPT_DIR,
+          ANNOTATION_DIR, RAW_PRED_DIR, METRICS_DIR, HF_CACHE, WHISPER_CACHE]:
+    os.makedirs(d, exist_ok=True)
+
+# Redirect HF cache to Drive so we don't redownload weights each session
+os.environ["HF_HOME"] = HF_CACHE
+os.environ["TRANSFORMERS_CACHE"] = HF_CACHE
+os.environ["HF_DATASETS_CACHE"] = HF_CACHE
+
+print(f"Repo:       {REPO_DIR}")
+print(f"Drive root: {DRIVE_ROOT}")
+print(f"HF cache:   {HF_CACHE}")
+'''
+
+
+INSTALL_DEPS_AV = '''# ─── Install model dependencies ──────────────────────────
+# transformers (Gemma-3n needs a recent build), accelerate, qwen-omni-utils
+# (only loaded when running 05_main_eval_qwen), imageio for frame sampling,
+# soundfile + librosa for audio I/O, openai-whisper for ASR.
+%pip install -q -U "transformers>=4.55.0" accelerate>=0.30 \
+    huggingface-hub>=0.24 imageio[ffmpeg] soundfile librosa scipy
+%pip install -q openai-whisper
+# Qwen-Omni preview branch is only needed for notebook 05; install when running it.
+'''
+
+
 # ────────────────────────────────────────────────────────────────────
-# Notebook 01: Setup and Download
+# 01: Setup + download
 # ────────────────────────────────────────────────────────────────────
 NB_01 = [
-    ("markdown", """# 01 — Setup, Annotations Download, and Video Acquisition
+    ("markdown", """# 01 — Setup, Annotations, and Video Acquisition
 
-This notebook prepares the AVUT-Human dataset for evaluation.
+Prepares the AVUT-Human dataset.
 
-**What it does:**
-1. Installs dependencies (transformers, accelerate, qwen-omni-utils, openai-whisper, yt-dlp, ffmpeg-python).
-2. Downloads the AVUT annotation JSONs from HuggingFace (`tsinghua-ee/AVUTBenchmark`).
-3. Inspects the JSON schema and prints a sample entry — **STOP and verify field names match `src/data_utils.py`**.
-4. Downloads videos from YouTube via `yt-dlp` and logs success rate per task.
+**What it does**
+1. Mounts Drive, clones repo, installs deps.
+2. Downloads `AV_Human_data.json` from `tsinghua-ee/AVUTBenchmark`.
+3. Picks a balanced sample (configurable `n_per_task`).
+4. Downloads videos directly from the HF dataset (NOT yt-dlp — the AVUT
+   authors host the mp4s themselves, so it's much more reliable).
 
-**Runtime:** ~2–4 hours (mostly YouTube downloads). Resume-safe: rerun to skip already-downloaded videos.
+**Runtime:** ~15-30 min on Colab depending on sample size and bandwidth.
+**GPU:** not needed for this notebook; CPU runtime is fine.
 
-**GPU:** Not required for this notebook; H100 is wasted here. Use a CPU runtime if available.
+Resume-safe: rerun to skip already-downloaded files.
 """),
-    ("markdown", "## 0. Environment\n\nIf running outside Colab, mount the repo manually. In Colab, clone the repo first:"),
-    ("code", """# Colab: clone repo (skip if running locally)
-import os, sys
-REPO = '/content/omnimodel-research'
-if not os.path.exists(REPO):
-    # Replace with your fork/branch as needed
-    !git clone https://github.com/<you>/omnimodel-research.git /content/omnimodel-research
-%cd $REPO
-sys.path.insert(0, REPO)
-"""),
-    ("code", """# Install dependencies. ffmpeg is preinstalled on Colab.
-!pip install -q transformers>=4.45 accelerate sentencepiece
-!pip install -q yt-dlp openai-whisper
-!pip install -q qwen-omni-utils
-!pip install -q huggingface_hub
-"""),
-    ("markdown", "## 1. Download AVUT annotations"),
-    ("code", """from huggingface_hub import hf_hub_download
-import json, os
+    ("code", BOOTSTRAP),
+    ("code", INSTALL_DEPS_AV),
+    ("markdown", "## Download annotations"),
+    ("code", '''from huggingface_hub import hf_hub_download
+import shutil
 
-os.makedirs('data/annotations', exist_ok=True)
+annotation_dst = os.path.join(ANNOTATION_DIR, "AV_Human_data.json")
+if not os.path.exists(annotation_dst):
+    src = hf_hub_download(
+        repo_id="tsinghua-ee/AVUTBenchmark",
+        filename="AV_Human_data.json",
+        repo_type="dataset",
+    )
+    shutil.copy(src, annotation_dst)
+    print(f"Saved {annotation_dst}")
+else:
+    print(f"Cached: {annotation_dst}")
+'''),
+    ("markdown", "## Inspect schema"),
+    ("code", '''from src import data_utils
 
-for fname in ['AV_Human_data.json', 'AV_Gemini_data.json']:
-    try:
-        path = hf_hub_download(
-            repo_id='tsinghua-ee/AVUTBenchmark',
-            filename=fname,
-            repo_type='dataset',
-            local_dir='data/annotations',
-        )
-        print(f'OK: {fname} → {path}')
-    except Exception as e:
-        print(f'FAILED: {fname}: {e}')
-"""),
-    ("markdown", "## 2. Inspect JSON schema (CRITICAL — verify before proceeding)"),
-    ("code", """with open('data/annotations/AV_Human_data.json') as f:
-    raw = json.load(f)
-
-print('Type at top level:', type(raw).__name__)
-entries = raw if isinstance(raw, list) else list(raw.values())
-print(f'Number of entries: {len(entries)}')
+entries = data_utils.load_annotations(annotation_dst)
+print(f"Loaded {len(entries)} valid entries")
 print()
-print('First entry — full schema:')
-print(json.dumps(entries[0], indent=2)[:2000])
+print("Task distribution (full set):")
+for code, n in sorted(data_utils.task_distribution_by_code(entries).items()):
+    print(f"  {code:5s}  {n:5d}")
 print()
-print('All keys present in first 50 entries:')
-keys = set()
-for e in entries[:50]:
-    if isinstance(e, dict):
-        keys.update(e.keys())
-print(sorted(keys))
-"""),
-    ("code", """# Task type distribution (uses src/data_utils.py with its tolerant field-name handling)
-from src.data_utils import load_annotations, filter_to_target_tasks, task_distribution
+print("Sample entry:", entries[0])
+'''),
+    ("markdown", "## Pick a balanced sample\n\n"
+                 "Set `N_PER_TASK` to control sample size. 20 is a quick pilot; "
+                 "100 is a good Colab default; 280+ matches Jeff's full run."),
+    ("code", '''import json
 
-normalized = load_annotations('data/annotations/AV_Human_data.json')
-print(f'Normalized entries (with valid video_id, question, options, answer): {len(normalized)}')
+N_PER_TASK = 100   # change me — 20 pilot, 100 default, 280+ full
+
+samples = data_utils.balanced_subsample(
+    entries, n_per_task=N_PER_TASK, seed=42,
+)
+print(f"Picked {len(samples)} samples ({N_PER_TASK}/task target)")
 print()
-print('Task distribution (all tasks):')
-print(json.dumps(task_distribution(normalized), indent=2))
-print()
-print('Task distribution (MCQ tasks we evaluate):')
-mcq = filter_to_target_tasks(normalized)
-print(json.dumps(task_distribution(mcq), indent=2))
-print(f'Total MCQ entries: {len(mcq)}')
-"""),
-    ("markdown", """## 3. Download videos via yt-dlp
+for code, n in sorted(data_utils.task_distribution_by_code(samples).items()):
+    print(f"  {code:5s}  {n}")
 
-We download up to 720p to keep storage reasonable. Since we'll later sample 120 entries, we can either:
-- (a) Download videos for all ~700 AV-Human entries (~50–100 GB), then sample.
-- (b) Sample first, then download only the 120-sample subset (~10 GB, much faster).
+manifest_path = os.path.join(DATA_DIR, "sample_manifest.json")
+with open(manifest_path, "w") as f:
+    json.dump(samples, f, indent=2)
+print(f"\\nManifest: {manifest_path}")
+'''),
+    ("markdown", "## Download videos from HuggingFace dataset"),
+    ("code", '''counts = data_utils.download_videos_from_hf(samples, VIDEO_DIR)
+print(counts)
 
-We use approach **(b)** for speed. If the sampled set has too many download failures, increase the sample size and resample.
-"""),
-    ("code", """from src.data_utils import balanced_subsample
-import subprocess
+# Filter manifest to only samples whose video downloaded successfully
+samples_avail = data_utils.filter_to_available_videos(samples, VIDEO_DIR)
+print(f"\\nAvailable videos: {len(samples_avail)} / {len(samples)}")
 
-# AVUT has 692 unique videos but 1734 QA pairs (each video has ~2.5 QAs across
-# different task types). Multiple QAs can share the same downloaded video.
-# We sample BY QUESTION (qa_id) but DEDUPE downloads by video_id.
-
-# Sample more than we need so we have headroom for failed YouTube downloads.
-N_PER_TASK_TO_DOWNLOAD = 30   # we'll keep 20/task after filtering for download success
-SEED = 42
-
-candidate_pool = balanced_subsample(mcq, n_per_task=N_PER_TASK_TO_DOWNLOAD, seed=SEED)
-unique_videos = list({s['video_id']: s for s in candidate_pool}.values())
-print(f'Candidate QA pairs: {len(candidate_pool)} ({N_PER_TASK_TO_DOWNLOAD}/task × 6 tasks)')
-print(f'Unique videos to download: {len(unique_videos)}')
-
-# Save the candidate set so we can re-run downstream notebooks deterministically
-os.makedirs('data', exist_ok=True)
-with open('data/candidate_samples.json', 'w') as f:
-    json.dump(candidate_pool, f, indent=2)
-print('Saved candidate QA list to data/candidate_samples.json')
-"""),
-    ("code", """# Download videos. Each AVUT entry already carries the YouTube URL inline
-# (`url` field), so no separate mapping file is needed.
-
-def youtube_url_for(sample):
-    return sample['url']  # AVUT annotations include the URL directly
-"""),
-    ("code", """os.makedirs('data/videos', exist_ok=True)
-download_log = []
-
-for i, sample in enumerate(unique_videos):
-    vid = sample['video_id']
-    out_path = f'data/videos/{vid}.mp4'
-    if os.path.exists(out_path):
-        download_log.append({'video_id': vid, 'status': 'cached'})
-        continue
-    url = youtube_url_for(sample)
-    try:
-        result = subprocess.run(
-            [
-                'yt-dlp',
-                '-f', 'bestvideo[height<=720]+bestaudio/best[height<=720]',
-                '--merge-output-format', 'mp4',
-                '-o', out_path,
-                '--no-playlist',
-                '--socket-timeout', '30',
-                '--quiet',
-                url,
-            ],
-            timeout=180,
-            check=False,
-            capture_output=True,
-        )
-        ok = os.path.exists(out_path)
-        download_log.append({'video_id': vid, 'status': 'ok' if ok else 'failed',
-                             'returncode': result.returncode})
-    except subprocess.TimeoutExpired:
-        download_log.append({'video_id': vid, 'status': 'timeout'})
-    if (i + 1) % 10 == 0:
-        succ = sum(1 for d in download_log if d['status'] in ('ok', 'cached'))
-        print(f'  [{i+1}/{len(unique_videos)}] success={succ}/{i+1}')
-
-from collections import Counter
-status_counts = Counter(d['status'] for d in download_log)
-print()
-print('Per-video download status:', dict(status_counts))
-n_avail = sum(1 for d in download_log if d['status'] in ('ok', 'cached'))
-print(f'Videos available on disk: {n_avail}/{len(download_log)}')
-
-# Now compute QA-level availability (a QA is available iff its video is)
-avail_vids = {d['video_id'] for d in download_log if d['status'] in ('ok', 'cached')}
-qa_avail = [s for s in candidate_pool if s['video_id'] in avail_vids]
-print(f'QA pairs available: {len(qa_avail)}/{len(candidate_pool)}')
-
-per_task = Counter(s['task_type'] for s in qa_avail)
-print('Per-task QA availability:')
-for t, n in per_task.most_common():
-    print(f'  {t}: {n}')
-
-with open('data/download_log.json', 'w') as f:
-    json.dump(download_log, f, indent=2)
-"""),
-    ("markdown", "## 4. Lock the final balanced eval set\n\nFilter the candidate pool to videos actually on disk, then sub-sample to exactly 20 per task. This is the canonical sample list every downstream notebook reads."),
-    ("code", """from src.data_utils import filter_to_available_videos, balanced_subsample, task_distribution_by_code
-
-available = filter_to_available_videos(candidate_pool, video_dir='data/videos')
-print(f'QA pairs with video on disk: {len(available)} / {len(candidate_pool)}')
-print('Per-task available:', task_distribution_by_code(available))
-
-N_PER_TASK_FINAL = 20
-final_set = balanced_subsample(available, n_per_task=N_PER_TASK_FINAL, seed=42)
-print()
-print(f'Final eval set: {len(final_set)} QA pairs ({N_PER_TASK_FINAL}/task)')
-print('Per-task final:', task_distribution_by_code(final_set))
-
-with open('data/eval_samples.json', 'w') as f:
-    json.dump(final_set, f, indent=2)
-print('Saved final eval sample list to data/eval_samples.json')
-"""),
-    ("markdown", "**Done.** Proceed to `02_preprocess.ipynb`."),
+# Save the filtered manifest — that's what subsequent notebooks read
+manifest_avail_path = os.path.join(DATA_DIR, "sample_manifest_available.json")
+with open(manifest_avail_path, "w") as f:
+    json.dump(samples_avail, f, indent=2)
+print(f"Available-only manifest: {manifest_avail_path}")
+'''),
+    ("markdown", "Next: run `02_preprocess.ipynb`."),
 ]
 
 
 # ────────────────────────────────────────────────────────────────────
-# Notebook 02: Preprocess
+# 02: Preprocess (ffmpeg + Whisper + mismatched pairs)
 # ────────────────────────────────────────────────────────────────────
 NB_02 = [
-    ("markdown", """# 02 — Preprocessing
+    ("markdown", """# 02 — Preprocess: audio extraction, silent video, ASR transcripts
 
-For each video in the locked eval set:
-1. Extract the audio track to `data/audio/{vid}.wav` (16 kHz mono PCM, Whisper-compatible).
-2. Strip audio to make a silent video at `data/silent_video/{vid}_silent.mp4` (used in S2 visual-only).
-3. Run Whisper-small for ASR transcript at `data/transcripts/{vid}.txt`.
-4. Build the mismatched-transcript pool (used in S5 lexical-override stage).
+For each video in the manifest:
+1. Extract 16-kHz mono audio (`.wav`) — used by S2/S4-S8.
+2. Strip audio to make a silent video — used by S3.
+3. Whisper-small transcribe → text — used by S5 (matched) and S7 (donor pool).
+4. Build the qa_id → donor video mismatched-transcript pairing — used by S7.
 
-**Runtime:** ~30–45 minutes for 120 videos on H100 (Whisper is the bottleneck).
-
-**Safe to re-run:** every step skips files that already exist.
+**Runtime:** ~5-15 min for 600 samples (Whisper on GPU). Cached: rerun to skip.
+**GPU:** strongly recommended for Whisper.
 """),
-    ("code", """import os, sys, json, subprocess
-REPO = '/content/omnimodel-research'
-if os.path.exists(REPO):
-    %cd $REPO
-    sys.path.insert(0, REPO)
-
+    ("code", BOOTSTRAP),
+    ("code", INSTALL_DEPS_AV),
+    ("code", '''import json, subprocess
 from pathlib import Path
 
-with open('data/eval_samples.json') as f:
+# ffmpeg ships with imageio[ffmpeg] but Colab has it system-wide too.
+subprocess.run(["ffmpeg", "-version"], capture_output=True, check=True)
+print("ffmpeg OK")
+
+manifest_path = os.path.join(DATA_DIR, "sample_manifest_available.json")
+with open(manifest_path) as f:
     samples = json.load(f)
-print(f'Preprocessing {len(samples)} videos.')
-
-VIDEO_DIR = 'data/videos'
-AUDIO_DIR = 'data/audio'
-SILENT_DIR = 'data/silent_video'
-TRANSCRIPT_DIR = 'data/transcripts'
-TRANSCRIPT_MISMATCHED_DIR = 'data/transcripts_mismatched'
-
-for d in [AUDIO_DIR, SILENT_DIR, TRANSCRIPT_DIR, TRANSCRIPT_MISMATCHED_DIR]:
-    os.makedirs(d, exist_ok=True)
-"""),
-    ("markdown", "## 1. Audio extraction (ffmpeg)"),
-    ("code", """for s in samples:
-    vid = s['video_id']
-    in_path = f'{VIDEO_DIR}/{vid}.mp4'
-    out_path = f'{AUDIO_DIR}/{vid}.wav'
-    if os.path.exists(out_path):
-        continue
-    if not os.path.exists(in_path):
-        print(f'  Skipping {vid}: no source video')
-        continue
-    subprocess.run([
-        'ffmpeg', '-y', '-i', in_path,
-        '-vn', '-acodec', 'pcm_s16le',
-        '-ar', '16000', '-ac', '1',
-        out_path,
+print(f"Manifest: {len(samples)} samples")
+'''),
+    ("markdown", "## Audio extraction + silent video"),
+    ("code", '''def extract_audio(video, out_wav):
+    if os.path.exists(out_wav) and os.path.getsize(out_wav) > 0:
+        return True
+    r = subprocess.run([
+        "ffmpeg", "-y", "-i", video,
+        "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
+        out_wav,
     ], capture_output=True)
-print(f'Audio files: {len([f for f in os.listdir(AUDIO_DIR) if f.endswith(".wav")])}')
-"""),
-    ("markdown", "## 2. Silent video creation (ffmpeg, audio-stripped)"),
-    ("code", """for s in samples:
-    vid = s['video_id']
-    in_path = f'{VIDEO_DIR}/{vid}.mp4'
-    out_path = f'{SILENT_DIR}/{vid}_silent.mp4'
-    if os.path.exists(out_path):
-        continue
-    if not os.path.exists(in_path):
-        continue
-    subprocess.run([
-        'ffmpeg', '-y', '-i', in_path,
-        '-an', '-c:v', 'copy',
-        out_path,
+    return r.returncode == 0 and os.path.exists(out_wav)
+
+
+def strip_audio(video, out_silent):
+    if os.path.exists(out_silent) and os.path.getsize(out_silent) > 0:
+        return True
+    r = subprocess.run([
+        "ffmpeg", "-y", "-i", video, "-an", "-c:v", "copy", out_silent,
     ], capture_output=True)
-print(f'Silent videos: {len([f for f in os.listdir(SILENT_DIR) if f.endswith(".mp4")])}')
-"""),
-    ("markdown", "## 3. Whisper transcripts (matched, for S4)"),
-    ("code", """from src.transcript_utils import transcribe_with_whisper
+    return r.returncode == 0 and os.path.exists(out_silent)
 
-# Whisper-small balances speed and quality. The transcript is intentionally imperfect —
-# real-world transcripts have errors, and a perfect transcript would inflate the
-# text signal artificially.
 
-for i, s in enumerate(samples):
-    vid = s['video_id']
-    audio_path = f'{AUDIO_DIR}/{vid}.wav'
+stats = {"audio_ok": 0, "silent_ok": 0, "fail": 0}
+for i, s in enumerate(samples, 1):
+    vid = s["video_id"]
+    video = os.path.join(VIDEO_DIR, f"{vid}.mp4")
+    audio_out = os.path.join(AUDIO_DIR, f"{vid}.wav")
+    silent_out = os.path.join(SILENT_DIR, f"{vid}_silent.mp4")
+    if not os.path.exists(video):
+        stats["fail"] += 1
+        continue
+    if extract_audio(video, audio_out):
+        stats["audio_ok"] += 1
+    else:
+        stats["fail"] += 1
+    if strip_audio(video, silent_out):
+        stats["silent_ok"] += 1
+    if i % 50 == 0:
+        print(f"  [{i}/{len(samples)}] audio={stats[\\'audio_ok\\']} silent={stats[\\'silent_ok\\']}")
+print(stats)
+'''),
+    ("markdown", "## Whisper transcripts (small)"),
+    ("code", '''import whisper as whisper_lib
+from src.transcript_utils import transcribe_with_whisper_python
+
+print("Loading Whisper-small...")
+whisper_model = whisper_lib.load_model("small", download_root=WHISPER_CACHE)
+print("OK")
+
+t_stats = {"ok": 0, "fail": 0}
+for i, s in enumerate(samples, 1):
+    vid = s["video_id"]
+    audio_path = os.path.join(AUDIO_DIR, f"{vid}.wav")
+    out_txt = os.path.join(TRANSCRIPT_DIR, f"{vid}.txt")
     if not os.path.exists(audio_path):
+        t_stats["fail"] += 1
         continue
-    text = transcribe_with_whisper(audio_path, output_dir=TRANSCRIPT_DIR, model_size='small')
-    if (i + 1) % 10 == 0:
-        print(f'  [{i+1}/{len(samples)}] transcripts done')
+    try:
+        transcribe_with_whisper_python(audio_path, out_txt, whisper_model)
+        t_stats["ok"] += 1
+    except Exception as e:
+        print(f"  ✗ {vid}: {e}")
+        t_stats["fail"] += 1
+    if i % 50 == 0:
+        print(f"  [{i}/{len(samples)}] {t_stats}")
+print(t_stats)
 
-ts_files = [f for f in os.listdir(TRANSCRIPT_DIR) if f.endswith('.txt')]
-print(f'Transcripts: {len(ts_files)}')
-"""),
-    ("markdown", """## 4. Mismatched-transcript pool (for S5)
-
-For each sample, pair it with the transcript of a DIFFERENT same-task video. This is the lexical-override condition: the audio in the played video tells the truth, but the transcript contradicts it.
-
-We persist the pairing to disk so S5 reads it deterministically.
-"""),
-    ("code", """from src.transcript_utils import build_mismatched_pairs, load_transcript
+# Free Whisper before model loads in subsequent notebooks
+import gc, torch
+del whisper_model
+gc.collect()
+if torch.cuda.is_available():
+    torch.cuda.empty_cache()
+'''),
+    ("markdown", "## Build mismatched-transcript pairing\n\n"
+                 "For S7: each qa_id is paired with a *different* video in the "
+                 "same task type. The donor's transcript is what we'll inject."),
+    ("code", '''from src.transcript_utils import build_mismatched_pairs
 
 pairs = build_mismatched_pairs(samples, seed=42)
-# pairs maps {qa_id: donor_video_id}
-
-n_written = 0
-for qa_id, donor_vid in pairs.items():
-    out_path = f'{TRANSCRIPT_MISMATCHED_DIR}/{qa_id}.txt'
-    if os.path.exists(out_path):
-        n_written += 1
-        continue
-    donor_text = load_transcript(f'{TRANSCRIPT_DIR}/{donor_vid}.txt')
-    if not donor_text:
-        continue
-    with open(out_path, 'w') as f:
-        f.write(donor_text)
-    n_written += 1
-
-with open('data/mismatched_pairs.json', 'w') as f:
-    # JSON keys must be strings — convert qa_id back when reading
+mm_path = os.path.join(DATA_DIR, "mismatched_pairs.json")
+with open(mm_path, "w") as f:
     json.dump({str(k): v for k, v in pairs.items()}, f, indent=2)
-
-print(f'Mismatched transcripts written: {n_written} / {len(pairs)}')
-"""),
-    ("markdown", """## Sanity check
-
-Confirm everything we need exists for each sample. If a sample is missing any artifact, drop it from the eval set — running stages on a partial sample creates messy paired-stage analysis later.
-"""),
-    ("code", """missing = []
-for s in samples:
-    vid = s['video_id']
-    qa_id = s['qa_id']
-    needed = [
-        f'{VIDEO_DIR}/{vid}.mp4',
-        f'{AUDIO_DIR}/{vid}.wav',
-        f'{SILENT_DIR}/{vid}_silent.mp4',
-        f'{TRANSCRIPT_DIR}/{vid}.txt',
-        f'{TRANSCRIPT_MISMATCHED_DIR}/{qa_id}.txt',
-    ]
-    missing_files = [p for p in needed if not os.path.exists(p)]
-    if missing_files:
-        missing.append({'qa_id': qa_id, 'video_id': vid, 'missing': missing_files})
-
-print(f'QA pairs with all artifacts: {len(samples) - len(missing)} / {len(samples)}')
-if missing:
-    print('Samples missing artifacts (will be dropped):')
-    for m in missing[:10]:
-        print(f"  qa_id={m['qa_id']} (video={m['video_id']}): missing {len(m['missing'])} files")
-
-bad_qa_ids = {m['qa_id'] for m in missing}
-clean_samples = [s for s in samples if s['qa_id'] not in bad_qa_ids]
-with open('data/eval_samples_clean.json', 'w') as f:
-    json.dump(clean_samples, f, indent=2)
-print(f'Final clean eval set: {len(clean_samples)} samples → data/eval_samples_clean.json')
-"""),
-    ("markdown", "**Done.** Proceed to `03_pilot.ipynb`."),
+print(f"Mismatched-pair manifest: {mm_path}")
+print(f"Pairings: {len(pairs)}")
+print(f"Sample pairings (first 5):")
+for qa_id, donor in list(pairs.items())[:5]:
+    print(f"  qa_id={qa_id} → donor video {donor}")
+'''),
+    ("markdown", "Next: `03_pilot.ipynb` for a 24-sample sanity check, "
+                 "or skip to `04_main_eval_gemma.ipynb` for the full run."),
 ]
 
 
 # ────────────────────────────────────────────────────────────────────
-# Notebook 03: Pilot
+# 03: Pilot (small, fast — confirms pipeline before main run)
 # ────────────────────────────────────────────────────────────────────
 NB_03 = [
-    ("markdown", """# 03 — Pilot Run (24 samples × 6 stages, Qwen2.5-Omni-7B)
+    ("markdown", """# 03 — Pilot Run (24 samples)
 
-Sanity-check the full pipeline before committing to the main run. Goals:
-- Verify Qwen2.5-Omni-7B loads, processes audio + video, and returns parseable output.
-- Verify the inline attribution probe in S3 produces parseable rankings >= 80% of the time. If parse rate is bad, iterate on prompt wording HERE before the main run.
-- Spot-check that S0 ≈ random (~25%), S2 << S3 on audio-essential tasks, etc.
-- Measure per-stage seconds/sample so we can size the main run's compute budget.
+A 4-per-task sanity check. Runs Gemma-3n-E2B-IT on stages S2-S4 only —
+just enough to confirm: model loads, prompts elicit the bracket format,
+parsing works, predictions look sensible.
 
-**Runtime:** ~20 minutes on H100 (4 samples/task × 6 tasks × 6 stages × ~10s ≈ 24 minutes).
+**Runtime:** ~5-10 min on Colab L4.
 """),
-    ("code", """import os, sys, json, time, random
-REPO = '/content/omnimodel-research'
-if os.path.exists(REPO):
-    %cd $REPO
-    sys.path.insert(0, REPO)
+    ("code", BOOTSTRAP),
+    ("code", INSTALL_DEPS_AV),
+    ("code", '''import json
+from src import data_utils, stages
+from src.model_utils import Gemma3nWrapper
 
-with open('data/eval_samples_clean.json') as f:
-    all_samples = json.load(f)
-print(f'Available eval samples: {len(all_samples)}')
+manifest_path = os.path.join(DATA_DIR, "sample_manifest_available.json")
+with open(manifest_path) as f:
+    full_manifest = json.load(f)
 
-# Pilot: 4 per task type from the clean set
-from src.data_utils import balanced_subsample
-pilot_samples = balanced_subsample(all_samples, n_per_task=4, seed=7)
-print(f'Pilot set: {len(pilot_samples)} samples')
-
-with open('data/pilot_samples.json', 'w') as f:
-    json.dump(pilot_samples, f, indent=2)
-"""),
-    ("code", """from src.model_utils import OmniModelWrapper, TextOnlyModelWrapper
-from src.prompts import STAGE_BUILDERS
-from src.parse_utils import parse_answer_confidence, parse_attribution, parse_reason
-
-print('Loading Qwen2.5-Omni-7B...')
-omni = OmniModelWrapper('Qwen/Qwen2.5-Omni-7B')
-print('Loading Qwen2.5-1.5B-Instruct (text baseline)...')
-text_only = TextOnlyModelWrapper('Qwen/Qwen2.5-1.5B-Instruct')
-print('Models loaded.')
-"""),
-    ("code", """# Helpers to construct stage-specific inputs
-from src.transcript_utils import load_transcript
-
-def stage_inputs(stage, sample):
-    vid = sample['video_id']
-    paths = {
-        'video': f'data/videos/{vid}.mp4',
-        'audio': f'data/audio/{vid}.wav',
-        'silent': f'data/silent_video/{vid}_silent.mp4',
-        'transcript': f'data/transcripts/{vid}.txt',
-        # Mismatched transcript is keyed by qa_id (a single video may have
-        # multiple QAs that need DIFFERENT mismatched donors)
-        'mismatched': f'data/transcripts_mismatched/{sample["qa_id"]}.txt',
-    }
-    if stage == 'S0':
-        return {'video_path': None, 'audio_path': None, 'extra': {}}
-    if stage == 'S1':
-        return {'video_path': None, 'audio_path': paths['audio'], 'extra': {}}
-    if stage == 'S2':
-        return {'video_path': paths['silent'], 'audio_path': None, 'extra': {}}
-    if stage == 'S3':
-        return {'video_path': paths['video'], 'audio_path': paths['audio'], 'extra': {}}
-    if stage == 'S4':
-        return {'video_path': paths['video'], 'audio_path': paths['audio'],
-                'extra': {'transcript': load_transcript(paths['transcript'])}}
-    if stage == 'S5':
-        return {'video_path': paths['video'], 'audio_path': paths['audio'],
-                'extra': {'mismatched_transcript': load_transcript(paths['mismatched'])}}
-    raise ValueError(stage)
-
-def run_one(stage, sample, model):
-    inp = stage_inputs(stage, sample)
-    prompt = STAGE_BUILDERS[stage](sample['question'], sample['options'], **inp['extra'])
-    resp = model.generate(prompt, video_path=inp['video_path'], audio_path=inp['audio_path'])
-    answer, conf = parse_answer_confidence(resp.text)
-    attr = parse_attribution(resp.text) if stage == 'S3' else None
-    reason = parse_reason(resp.text) if stage == 'S3' else None
+# 4 per task → 24 samples
+pilot = data_utils.balanced_subsample(full_manifest, n_per_task=4, seed=7)
+print(f"Pilot samples: {len(pilot)}")
+'''),
+    ("code", '''# Load Gemma-3n
+gemma = Gemma3nWrapper(model_name="google/gemma-3n-E2B-it")
+print("Gemma loaded")
+'''),
+    ("code", '''# Run a few stages on the pilot — just to verify everything works
+def get_paths(s):
+    vid = s["video_id"]
     return {
-        'qa_id': sample['qa_id'],
-        'video_id': sample['video_id'],
-        'task_type': sample['task_type'],
-        'task_code': sample.get('task_code'),
-        'stage': stage,
-        'ground_truth': sample['answer'],
-        'predicted_answer': answer,
-        'verbalized_confidence': conf,
-        'answer_logprobs': resp.answer_logprobs,
-        'attribution': attr,
-        'attribution_reason': reason,
-        'raw_response': resp.text,
+        "video":  os.path.join(VIDEO_DIR, f"{vid}.mp4"),
+        "silent": os.path.join(SILENT_DIR, f"{vid}_silent.mp4"),
+        "audio":  os.path.join(AUDIO_DIR, f"{vid}.wav"),
+        "transcript": os.path.join(TRANSCRIPT_DIR, f"{vid}.txt"),
     }
-"""),
-    ("code", """import os
-os.makedirs('results/raw_predictions/pilot', exist_ok=True)
 
-STAGES = ['S0', 'S1', 'S2', 'S3', 'S4', 'S5']
-timings = {}
+PILOT_STAGES = ["S2_audio_only", "S3_visual_only", "S4_full_av"]
+pilot_results = {s: [] for s in PILOT_STAGES}
 
-for stage in STAGES:
-    print(f'\\n=== {stage} ===')
-    t0 = time.time()
-    records = []
-    model = text_only if stage == 'S0' else omni
-    for i, s in enumerate(pilot_samples):
+for stage in PILOT_STAGES:
+    fn = stages.STAGE_REGISTRY[stage]["fn"]
+    for s in pilot:
         try:
-            rec = run_one(stage, s, model)
+            row = fn(gemma, s, get_paths(s))
+            pilot_results[stage].append(row)
         except Exception as e:
-            rec = {'qa_id': s['qa_id'], 'video_id': s['video_id'],
-                   'task_type': s['task_type'], 'task_code': s.get('task_code'),
-                   'stage': stage, 'ground_truth': s['answer'],
-                   'predicted_answer': None, 'verbalized_confidence': None,
-                   'answer_logprobs': None, 'attribution': None,
-                   'attribution_reason': None, 'raw_response': f'<ERROR: {e}>'}
-        records.append(rec)
-        if (i + 1) % 5 == 0:
-            print(f'  [{i+1}/{len(pilot_samples)}]')
-
-    with open(f'results/raw_predictions/pilot/{stage}.json', 'w') as f:
-        json.dump(records, f, indent=2)
-    elapsed = time.time() - t0
-    timings[stage] = {'total_s': elapsed, 'per_sample_s': elapsed / len(pilot_samples)}
-    print(f'  {stage} done in {elapsed:.0f}s ({elapsed/len(pilot_samples):.1f}s/sample)')
-
-with open('results/raw_predictions/pilot/_timings.json', 'w') as f:
-    json.dump(timings, f, indent=2)
-"""),
-    ("markdown", "## Sanity-check the pilot results"),
-    ("code", """from src.metrics import accuracy_per_task
-
-for stage in STAGES:
-    with open(f'results/raw_predictions/pilot/{stage}.json') as f:
-        recs = json.load(f)
-    parsed = sum(1 for r in recs if r['predicted_answer'] is not None)
-    acc = accuracy_per_task(recs)
-    print(f'{stage}: parse_rate={parsed}/{len(recs)}  overall_acc={acc.get("OVERALL", 0):.2f}')
-    if stage == 'S3':
-        attr_parsed = sum(1 for r in recs if r['attribution'] is not None)
-        print(f'   S3 attribution parse rate: {attr_parsed}/{len(recs)}')
-"""),
-    ("markdown", """## Decisions before main run
-
-After running the cells above, check:
-
-1. **Parse rates** — if any stage has < 80% answer parse rate, fix the prompt in `src/prompts.py` before kicking off the main run.
-2. **S3 attribution parse rate** — < 80% means the attribution probe needs prompt iteration. The format `[ANSWER] X [CONFIDENCE] Y / [RANK] Audio=A, Visual=V, Text=T` is brittle.
-3. **Per-sample timings** — if S3/S4/S5 are >> 15s/sample, the 120-sample main run will exceed the 2hr budget. Consider reducing N_PER_TASK to 15 in 04.
-4. **S0 accuracy ≈ 0.25** — if S0 is much higher, the AVUT text-shortcut filtering is being violated by the small text model. Worth flagging in the paper either way.
-
-When all checks pass, proceed to `04_main_eval_qwen.ipynb`.
-"""),
+            print(f"  ✗ {stage} qa_id={s[\\'qa_id\\']}: {e}")
+    valid = sum(1 for r in pilot_results[stage] if r.get("predicted_answer"))
+    print(f"  {stage}: {valid}/{len(pilot)} parseable")
+'''),
+    ("code", '''# Quick accuracy summary
+from src import metrics
+acc = metrics.compute_accuracy(pilot_results)
+for stage, per_task in acc.items():
+    print(f"\\n{stage}:")
+    for task, d in per_task.items():
+        if d.get("accuracy") is not None:
+            print(f"  {task:35s} {d[\\'accuracy\\']:.2f} ({d[\\'n_correct\\']}/{d[\\'n_valid\\']})")
+'''),
+    ("markdown", "If everything looks right above, proceed to `04_main_eval_gemma.ipynb`."),
 ]
 
 
 # ────────────────────────────────────────────────────────────────────
-# Notebook 04: Main eval (Qwen)
+# 04: Main Gemma run — full sample, all 8 stages
 # ────────────────────────────────────────────────────────────────────
-NB_04 = [
-    ("markdown", """# 04 — Main Evaluation: Qwen2.5-Omni-7B (120 samples × S0–S5)
+def main_eval_cells(model_label: str, model_var: str, model_loader_code: str,
+                    stages_to_run_default: str, predictions_subdir: str,
+                    runtime_estimate: str) -> List[Cell]:
+    """Build the cells for a main-eval notebook (Gemma or Qwen)."""
+    return [
+        ("markdown", f"""# 04 — Main evaluation: {model_label}
 
-Runs the canonical evaluation. Results land in `results/raw_predictions/qwen/`.
+Runs every stage in `DEFAULT_STAGE_ORDER` over the full available
+manifest. Saves one JSON per stage to `{predictions_subdir}/`.
 
-**Runtime budget:** ~2hr on H100. Per-stage estimate from the pilot (`results/raw_predictions/pilot/_timings.json`):
-- S0 (text-only): negligible
-- S1, S2, S3, S4, S5: ~12s/sample × 120 ≈ 24min each
-
-Each stage is checkpointed every 20 samples, so a Colab disconnect doesn't lose work — re-running this notebook resumes from the last checkpoint.
+**Runtime:** {runtime_estimate}
+**Resume-safe:** if Colab times out, rerun the cell — qa_ids already done
+are skipped.
 """),
-    ("code", """import os, sys, json, time
-REPO = '/content/omnimodel-research'
-if os.path.exists(REPO):
-    %cd $REPO
-    sys.path.insert(0, REPO)
+        ("code", BOOTSTRAP),
+        ("code", INSTALL_DEPS_AV),
+        ("code", f'''import json, time, gc
+import torch
+from src import data_utils, stages
+from src.stages import STAGE_REGISTRY, DEFAULT_STAGE_ORDER
 
-with open('data/eval_samples_clean.json') as f:
+manifest_path = os.path.join(DATA_DIR, "sample_manifest_available.json")
+with open(manifest_path) as f:
     samples = json.load(f)
-print(f'Eval samples: {len(samples)}')
-"""),
-    ("code", """from src.model_utils import OmniModelWrapper, TextOnlyModelWrapper
-from src.prompts import STAGE_BUILDERS
-from src.parse_utils import parse_answer_confidence, parse_attribution, parse_reason
-from src.transcript_utils import load_transcript
+print(f"Manifest: {{len(samples)}} samples")
 
-print('Loading models...')
-omni = OmniModelWrapper('Qwen/Qwen2.5-Omni-7B')
-text_only = TextOnlyModelWrapper('Qwen/Qwen2.5-1.5B-Instruct')
-print('Models loaded.')
-"""),
-    ("code", """def stage_inputs(stage, sample):
-    vid = sample['video_id']
+PRED_DIR = os.path.join(RAW_PRED_DIR, "{predictions_subdir}")
+os.makedirs(PRED_DIR, exist_ok=True)
+
+# Mismatched-transcript pairings (built in notebook 02)
+mm_path = os.path.join(DATA_DIR, "mismatched_pairs.json")
+mismatched_pairs = {{}}
+if os.path.exists(mm_path):
+    with open(mm_path) as f:
+        mismatched_pairs = {{int(k): v for k, v in json.load(f).items()}}
+print(f"Mismatched pairings: {{len(mismatched_pairs)}}")
+'''),
+        ("code", f'''# Stages to run — change to a subset if you want to skip some
+STAGES_TO_RUN = "{stages_to_run_default}".split(",")
+print("Will run:", STAGES_TO_RUN)
+'''),
+        ("code", '''def get_paths(s, mismatched_pairs):
+    vid = s["video_id"]
     paths = {
-        'video':      f'data/videos/{vid}.mp4',
-        'audio':      f'data/audio/{vid}.wav',
-        'silent':     f'data/silent_video/{vid}_silent.mp4',
-        'transcript': f'data/transcripts/{vid}.txt',
-        # Mismatched transcript is keyed by qa_id (a single video may have
-        # multiple QAs that need DIFFERENT mismatched donors)
-        'mismatched': f'data/transcripts_mismatched/{sample["qa_id"]}.txt',
+        "video":  os.path.join(VIDEO_DIR, f"{vid}.mp4"),
+        "silent": os.path.join(SILENT_DIR, f"{vid}_silent.mp4"),
+        "audio":  os.path.join(AUDIO_DIR, f"{vid}.wav"),
+        "transcript": os.path.join(TRANSCRIPT_DIR, f"{vid}.txt"),
     }
-    routes = {
-        'S0': dict(video_path=None, audio_path=None, extra={}),
-        'S1': dict(video_path=None, audio_path=paths['audio'], extra={}),
-        'S2': dict(video_path=paths['silent'], audio_path=None, extra={}),
-        'S3': dict(video_path=paths['video'], audio_path=paths['audio'], extra={}),
-        'S4': dict(video_path=paths['video'], audio_path=paths['audio'],
-                   extra={'transcript': load_transcript(paths['transcript'])}),
-        'S5': dict(video_path=paths['video'], audio_path=paths['audio'],
-                   extra={'mismatched_transcript': load_transcript(paths['mismatched'])}),
-    }
-    return routes[stage]
+    donor = mismatched_pairs.get(s["qa_id"])
+    if donor:
+        paths["mismatched_transcript"] = os.path.join(TRANSCRIPT_DIR, f"{donor}.txt")
+        paths["donor_video_id"] = donor
+    return paths
 
-def run_one(stage, sample, model):
-    inp = stage_inputs(stage, sample)
-    prompt = STAGE_BUILDERS[stage](sample['question'], sample['options'], **inp['extra'])
-    resp = model.generate(prompt, video_path=inp['video_path'], audio_path=inp['audio_path'])
-    answer, conf = parse_answer_confidence(resp.text)
-    attr = parse_attribution(resp.text) if stage == 'S3' else None
-    reason = parse_reason(resp.text) if stage == 'S3' else None
-    return {
-        'video_id': sample['video_id'], 'task_type': sample['task_type'], 'stage': stage,
-        'ground_truth': sample['answer'], 'predicted_answer': answer,
-        'verbalized_confidence': conf, 'answer_logprobs': resp.answer_logprobs,
-        'attribution': attr, 'attribution_reason': reason, 'raw_response': resp.text,
-    }
 
-OUT_DIR = 'results/raw_predictions/qwen'
-os.makedirs(OUT_DIR, exist_ok=True)
-"""),
-    ("code", """def run_stage(stage, samples, model, checkpoint_every=20):
-    out_path = f'{OUT_DIR}/{stage}.json'
-    done = []
-    if os.path.exists(out_path):
-        with open(out_path) as f:
-            done = json.load(f)
-        print(f'  {stage}: resuming with {len(done)} cached records')
-    done_ids = {r['qa_id'] for r in done}
-    todo = [s for s in samples if s['qa_id'] not in done_ids]
-    if not todo:
-        print(f'  {stage}: already complete')
-        return done
+def stage_path(stage_name):
+    return os.path.join(PRED_DIR, f"{stage_name}.json")
+
+
+def load_existing(stage_name):
+    p = stage_path(stage_name)
+    if not os.path.exists(p):
+        return []
+    with open(p) as f:
+        return json.load(f)
+
+
+def save_rows(stage_name, rows):
+    with open(stage_path(stage_name), "w") as f:
+        json.dump(rows, f, indent=2)
+
+
+def already_done_ids(stage_name):
+    return {r["qa_id"] for r in load_existing(stage_name)
+            if r.get("predicted_answer") is not None}
+'''),
+        ("code", model_loader_code),
+        ("code", f'''def run_stage(stage_name, samples, model, s4_lookup=None):
+    spec = STAGE_REGISTRY[stage_name]
+    fn = spec["fn"]
+    done = already_done_ids(stage_name)
+    rows = load_existing(stage_name)
+    todo = [s for s in samples if s["qa_id"] not in done]
+    print(f"\\n[{{stage_name}}] {{len(done)}} done, {{len(todo)}} to go")
 
     t0 = time.time()
-    records = list(done)
-    for i, s in enumerate(todo):
+    for i, s in enumerate(todo, 1):
+        paths = get_paths(s, mismatched_pairs)
         try:
-            rec = run_one(stage, s, model)
+            if stage_name == "S6_attribution":
+                s4_row = s4_lookup.get(s["qa_id"])
+                if s4_row is None:
+                    continue
+                row = fn(model, s, paths, s4_row)
+            else:
+                row = fn(model, s, paths)
         except Exception as e:
-            rec = {'video_id': s['video_id'], 'task_type': s['task_type'], 'stage': stage,
-                   'ground_truth': s['answer'], 'predicted_answer': None,
-                   'verbalized_confidence': None, 'answer_logprobs': None,
-                   'attribution': None, 'attribution_reason': None,
-                   'raw_response': f'<ERROR: {e}>'}
-        records.append(rec)
-        if (i + 1) % checkpoint_every == 0 or (i + 1) == len(todo):
-            with open(out_path, 'w') as f:
-                json.dump(records, f, indent=2)
+            row = {{
+                "qa_id": s["qa_id"], "video_id": s["video_id"],
+                "task_type": s["task_type"], "task_code": s.get("task_code"),
+                "stage": stage_name,
+                "error": f"{{type(e).__name__}}: {{str(e)[:200]}}",
+                "predicted_answer": None, "confidence": None,
+            }}
+        rows.append(row)
+        if i % 25 == 0:
+            save_rows(stage_name, rows)
             elapsed = time.time() - t0
-            done_n = len(records)
-            print(f'  {stage}: {done_n}/{len(samples)}  ({elapsed:.0f}s elapsed, {elapsed/(i+1):.1f}s/sample)')
-    return records
-
-STAGES = ['S0', 'S1', 'S2', 'S3', 'S4', 'S5']
-all_results = {}
-for stage in STAGES:
-    print(f'\\n=== Running {stage} ===')
-    model = text_only if stage == 'S0' else omni
-    all_results[stage] = run_stage(stage, samples, model)
-print('\\n=== Main eval complete ===')
-"""),
-    ("code", """# Quick sanity scan
-from src.metrics import accuracy_per_task
-for stage in STAGES:
-    with open(f'{OUT_DIR}/{stage}.json') as f:
-        recs = json.load(f)
-    acc = accuracy_per_task(recs)
-    parse_rate = sum(1 for r in recs if r['predicted_answer'] is not None) / len(recs)
-    print(f'{stage}: parse={parse_rate:.0%}  overall_acc={acc.get("OVERALL", 0):.2f}  per-task={ {t: f"{v:.2f}" for t, v in acc.items() if t != "OVERALL"} }')
-"""),
-    ("markdown", "**Done.** Proceed to `06_analysis.ipynb` for metric computation, or `05_main_eval_gemma.ipynb` for cross-model comparison."),
-]
+            rate = elapsed / i
+            print(f"  [{{i}}/{{len(todo)}}] {{rate:.1f}}s/sample, "
+                  f"ETA {{rate * (len(todo) - i):.0f}}s")
+    save_rows(stage_name, rows)
+    print(f"  saved {{len(rows)}} rows to {{stage_path(stage_name)}}")
+    return rows
 
 
-# ────────────────────────────────────────────────────────────────────
-# Notebook 05: Main eval (Gemma-3n) — optional cross-model
-# ────────────────────────────────────────────────────────────────────
-NB_05 = [
-    ("markdown", """# 05 — Main Evaluation: Gemma-3n-E2B-IT (cross-model comparison)
+# Phase A: text-only stage (small Qwen2.5-1.5B)
+text_stages = [s for s in STAGES_TO_RUN if STAGE_REGISTRY[s]["model"] == "text"]
+if text_stages:
+    from src.model_utils import TextOnlyModelWrapper
+    print("Loading Qwen2.5-1.5B-Instruct (text-only baseline)...")
+    text_model = TextOnlyModelWrapper()
+    for stage in text_stages:
+        run_stage(stage, samples, text_model)
+    del text_model
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
-Optional. Run if Qwen results look interesting and we want to test whether the confabulation finding generalizes across model families.
+# Phase B: omnimodal stages
+omni_stages = [s for s in STAGES_TO_RUN if STAGE_REGISTRY[s]["model"] == "omni"]
+if omni_stages:
+    {model_var} = load_omni_model()
+    s4_lookup = {{}}
+    for stage in omni_stages:
+        if stage == "S6_attribution" and not s4_lookup:
+            s4_rows = load_existing("S4_full_av")
+            s4_lookup = {{r["qa_id"]: r for r in s4_rows}}
+            if not s4_lookup:
+                print("  S4_full_av not run yet; skipping S6_attribution.")
+                continue
+        run_stage(stage, samples, {model_var}, s4_lookup=s4_lookup)
+    del {model_var}
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
-**Runtime:** ~1hr on H100 (Gemma-3n-E2B is smaller than Qwen2.5-Omni-7B).
+print("\\nDone. Predictions in:", PRED_DIR)
+'''),
+        ("markdown", f"Next: `06_analysis.ipynb` to compute metrics on `{predictions_subdir}/`."),
+    ]
 
-**Caveat:** Gemma-3n's audio support is more limited than Qwen2.5-Omni's. If Gemma doesn't accept audio-only input cleanly (S1), we may need to skip S1 for Gemma and report findings only across S2–S5.
-"""),
-    ("code", """import os, sys, json, time
-REPO = '/content/omnimodel-research'
-if os.path.exists(REPO):
-    %cd $REPO
-    sys.path.insert(0, REPO)
 
-with open('data/eval_samples_clean.json') as f:
-    samples = json.load(f)
-print(f'Eval samples: {len(samples)}')
-"""),
-    ("code", """from src.model_utils import GemmaOmniWrapper, TextOnlyModelWrapper
-from src.prompts import STAGE_BUILDERS
-from src.parse_utils import parse_answer_confidence, parse_attribution, parse_reason
-from src.transcript_utils import load_transcript
+GEMMA_LOADER = '''from src.model_utils import Gemma3nWrapper
 
-gemma = GemmaOmniWrapper('google/gemma-3n-E2B-it')
-text_only = TextOnlyModelWrapper('Qwen/Qwen2.5-1.5B-Instruct')
+def load_omni_model():
+    return Gemma3nWrapper(
+        model_name="google/gemma-3n-E2B-it",
+        num_video_frames=8,
+        audio_max_seconds=30.0,
+    )
+'''
 
-# Reuse stage_inputs and run_one from notebook 04
-def stage_inputs(stage, sample):
-    vid = sample['video_id']
-    paths = {
-        'video':      f'data/videos/{vid}.mp4',
-        'audio':      f'data/audio/{vid}.wav',
-        'silent':     f'data/silent_video/{vid}_silent.mp4',
-        'transcript': f'data/transcripts/{vid}.txt',
-        # Mismatched transcript is keyed by qa_id (a single video may have
-        # multiple QAs that need DIFFERENT mismatched donors)
-        'mismatched': f'data/transcripts_mismatched/{sample["qa_id"]}.txt',
-    }
-    routes = {
-        'S0': dict(video_path=None, audio_path=None, extra={}),
-        'S1': dict(video_path=None, audio_path=paths['audio'], extra={}),
-        'S2': dict(video_path=paths['silent'], audio_path=None, extra={}),
-        'S3': dict(video_path=paths['video'], audio_path=paths['audio'], extra={}),
-        'S4': dict(video_path=paths['video'], audio_path=paths['audio'],
-                   extra={'transcript': load_transcript(paths['transcript'])}),
-        'S5': dict(video_path=paths['video'], audio_path=paths['audio'],
-                   extra={'mismatched_transcript': load_transcript(paths['mismatched'])}),
-    }
-    return routes[stage]
 
-def run_one(stage, sample, model):
-    inp = stage_inputs(stage, sample)
-    prompt = STAGE_BUILDERS[stage](sample['question'], sample['options'], **inp['extra'])
-    resp = model.generate(prompt, video_path=inp['video_path'], audio_path=inp['audio_path'])
-    answer, conf = parse_answer_confidence(resp.text)
-    attr = parse_attribution(resp.text) if stage == 'S3' else None
-    reason = parse_reason(resp.text) if stage == 'S3' else None
-    return {
-        'video_id': sample['video_id'], 'task_type': sample['task_type'], 'stage': stage,
-        'ground_truth': sample['answer'], 'predicted_answer': answer,
-        'verbalized_confidence': conf, 'answer_logprobs': resp.answer_logprobs,
-        'attribution': attr, 'attribution_reason': reason, 'raw_response': resp.text,
-    }
+QWEN_LOADER = '''# Qwen-Omni preview branch needs a specific transformers ref:
+%pip install -q "git+https://github.com/huggingface/transformers@v4.51.3-Qwen2.5-Omni-preview"
+%pip install -q "qwen-omni-utils[decord]>=0.0.4"
 
-OUT_DIR = 'results/raw_predictions/gemma'
-os.makedirs(OUT_DIR, exist_ok=True)
-"""),
-    ("code", """def run_stage(stage, samples, model, checkpoint_every=20):
-    out_path = f'{OUT_DIR}/{stage}.json'
-    done = []
-    if os.path.exists(out_path):
-        with open(out_path) as f:
-            done = json.load(f)
-    done_ids = {r['qa_id'] for r in done}
-    todo = [s for s in samples if s['qa_id'] not in done_ids]
-    if not todo:
-        return done
-    records = list(done)
-    t0 = time.time()
-    for i, s in enumerate(todo):
-        try:
-            rec = run_one(stage, s, model)
-        except Exception as e:
-            rec = {'video_id': s['video_id'], 'task_type': s['task_type'], 'stage': stage,
-                   'ground_truth': s['answer'], 'predicted_answer': None,
-                   'verbalized_confidence': None, 'answer_logprobs': None,
-                   'attribution': None, 'attribution_reason': None,
-                   'raw_response': f'<ERROR: {e}>'}
-        records.append(rec)
-        if (i + 1) % checkpoint_every == 0 or (i + 1) == len(todo):
-            with open(out_path, 'w') as f:
-                json.dump(records, f, indent=2)
-            print(f'  {stage}: {len(records)}/{len(samples)}  ({(time.time()-t0)/(i+1):.1f}s/sample)')
-    return records
+from src.model_utils import QwenOmniWrapper
 
-# Skip S1 if audio-only doesn't work; we'll detect this empirically
-STAGES = ['S0', 'S2', 'S3', 'S4', 'S5']  # try without S1 first
-print('Running Gemma-3n stages: ', STAGES)
-for stage in STAGES:
-    print(f'\\n=== {stage} ===')
-    model = text_only if stage == 'S0' else gemma
-    run_stage(stage, samples, model)
-"""),
-    ("markdown", "**Done.** Proceed to `06_analysis.ipynb`."),
-]
+def load_omni_model():
+    return QwenOmniWrapper(model_name="Qwen/Qwen2.5-Omni-7B")
+'''
+
+
+NB_04 = main_eval_cells(
+    model_label="Gemma-3n-E2B-IT (PRIMARY)",
+    model_var="omni_model",
+    model_loader_code=GEMMA_LOADER,
+    stages_to_run_default="S1_text_only,S2_audio_only,S3_visual_only,S4_full_av,"
+                          "S5_transcript_injected,S6_attribution,S7_mismatched_transcript",
+    predictions_subdir="gemma_3n_e2b",
+    runtime_estimate="~6-10 hr on Colab L4 for 600 samples × 7 stages.",
+)
+
+
+NB_05 = main_eval_cells(
+    model_label="Qwen2.5-Omni-7B (cross-model robustness)",
+    model_var="omni_model",
+    model_loader_code=QWEN_LOADER,
+    stages_to_run_default="S1_text_only,S2_audio_only,S3_visual_only,S4_full_av,"
+                          "S5_transcript_injected,S6_attribution,S7_mismatched_transcript",
+    predictions_subdir="qwen2_5_omni_7b",
+    runtime_estimate="~10-14 hr on Colab A100 for 600 samples × 7 stages. Needs ≥40GB VRAM.",
+)
 
 
 # ────────────────────────────────────────────────────────────────────
-# Notebook 06: Analysis
+# 06: Analysis — compute metrics + cross-model comparison
 # ────────────────────────────────────────────────────────────────────
 NB_06 = [
-    ("markdown", """# 06 — Analysis & Figures
+    ("markdown", """# 06 — Analysis: compute metrics, render figures, cross-model comparison
 
-Reads `results/raw_predictions/{model}/S*.json` and computes:
-- Per-task accuracy table (S0–S5)
-- Confidence summaries (verbalized + logprob-based)
-- ECE per stage
-- Confidence Drop (ΔConf) under modality ablation
-- Attribution Faithfulness Score (AFS) — the headline metric
-- Transcript Injection Bias (TIB)
-- Lexical Override Rate (LOR)
-- Answer flip rates between stage pairs
+For each model run we have, compute every metric and save under
+`results/metrics/<model>/`. Then load Jeff's published Qwen-Omni-7B
+metrics from his repo for a side-by-side comparison.
 
-Outputs land in `results/metrics/` (JSONs) and `results/figures/` (PNGs).
+**Runtime:** seconds.
+**GPU:** not needed.
 """),
-    ("code", """import os, sys, json
-REPO = '/content/omnimodel-research'
-if os.path.exists(REPO):
-    %cd $REPO
-    sys.path.insert(0, REPO)
+    ("code", BOOTSTRAP),
+    ("code", '%pip install -q matplotlib pandas scipy'),
+    ("code", '''import json, glob
+from src import metrics
 
-import matplotlib.pyplot as plt
+# Discover model runs we have predictions for
+model_runs = sorted(glob.glob(os.path.join(RAW_PRED_DIR, "*")))
+model_runs = [m for m in model_runs if os.path.isdir(m)]
+print("Found prediction sets:")
+for m in model_runs:
+    print(f"  {m}")
+'''),
+    ("code", '''def load_stages(pred_dir):
+    stages = {}
+    for path in sorted(glob.glob(os.path.join(pred_dir, "*.json"))):
+        name = os.path.splitext(os.path.basename(path))[0]
+        with open(path) as f:
+            stages[name] = json.load(f)
+    return stages
+
+
+all_metrics = {}
+for run_dir in model_runs:
+    name = os.path.basename(run_dir)
+    print(f"\\n=== {name} ===")
+    stages = load_stages(run_dir)
+    for s, rows in stages.items():
+        valid = sum(1 for r in rows if r.get("predicted_answer") is not None)
+        print(f"  {s:30s} {len(rows):4d} rows  ({valid} parseable)")
+    report = metrics.compute_all(stages)
+    all_metrics[name] = report
+
+    out_dir = os.path.join(METRICS_DIR, name)
+    os.makedirs(out_dir, exist_ok=True)
+    for fname, data in report.items():
+        with open(os.path.join(out_dir, f"{fname}.json"), "w") as f:
+            json.dump(data, f, indent=2)
+    print(f"  → metrics saved to {out_dir}")
+'''),
+    ("markdown", "## Headline summary"),
+    ("code", '''def show_overall(report, name):
+    print(f"\\n=== {name} — overall ===")
+    acc = report["accuracy_per_task_per_stage"]
+    print("Accuracy by stage:")
+    for stage in sorted(acc.keys()):
+        ov = acc[stage].get("OVERALL", {})
+        if ov.get("accuracy") is not None:
+            print(f"  {stage:30s} {ov[\\'accuracy\\']:.3f}")
+    afs_o = report["attribution_faithfulness"].get("OVERALL", {})
+    if afs_o:
+        print(f"\\nAFS overall: {afs_o.get(\\'afs\\')}  "
+              f"(F={afs_o.get(\\'faithful\\')}, C={afs_o.get(\\'confabulated\\')}, "
+              f"T={afs_o.get(\\'trivial\\')}, U={afs_o.get(\\'unparseable\\')})")
+    lor_o = report["lexical_override_rate"].get("OVERALL", {})
+    if lor_o:
+        print(f"LOR overall: {lor_o.get(\\'lor\\')}  "
+              f"(flipped={lor_o.get(\\'flipped\\')}, stayed={lor_o.get(\\'stayed\\')})")
+    tib_overall = report["transcript_injection_bias"].get("OVERALL", {})
+    if tib_overall:
+        print(f"TIB overall: {tib_overall.get(\\'tib\\')}")
+
+
+for name, report in all_metrics.items():
+    show_overall(report, name)
+'''),
+    ("markdown", "## Cross-model comparison: ours vs Jeff's published Qwen-Omni\n\n"
+                 "Loads Jeff's metrics JSONs from his GitHub for a side-by-side."),
+    ("code", '''import urllib.request
+
+# Pull Jeff's published metrics directly from GitHub
+JEFF_BASE = "https://raw.githubusercontent.com/jjwang8/639_avut/main/results/metrics"
+
+def fetch_jeff(name):
+    try:
+        with urllib.request.urlopen(f"{JEFF_BASE}/{name}.json", timeout=30) as r:
+            return json.loads(r.read())
+    except Exception as e:
+        print(f"  ✗ {name}: {e}")
+        return None
+
+jeff_acc = fetch_jeff("accuracy_per_task_per_stage")
+jeff_afs = fetch_jeff("attribution_faithfulness")
+jeff_tib = fetch_jeff("transcript_injection_bias")
+jeff_drops = fetch_jeff("confidence_drops")
+
+print("Loaded Jeff's metrics" if jeff_acc else "(skipping comparison)")
+'''),
+    ("code", '''import pandas as pd
+
+def cross_model_accuracy_table(all_metrics, jeff_acc):
+    rows = []
+    if jeff_acc:
+        for stage, per_task in jeff_acc.items():
+            ov = per_task.get("OVERALL", {})
+            rows.append({"model": "qwen2.5-omni-7b (jeff)", "stage": stage,
+                         "accuracy": ov.get("accuracy"),
+                         "n_valid": ov.get("n_valid")})
+    for model_name, report in all_metrics.items():
+        for stage, per_task in report["accuracy_per_task_per_stage"].items():
+            ov = per_task.get("OVERALL", {})
+            rows.append({"model": model_name, "stage": stage,
+                         "accuracy": ov.get("accuracy"),
+                         "n_valid": ov.get("n_valid")})
+    return pd.DataFrame(rows).pivot(index="stage", columns="model",
+                                     values="accuracy")
+
+
+tbl = cross_model_accuracy_table(all_metrics, jeff_acc)
+print("Overall accuracy by stage (cross-model):")
+print(tbl.round(3).to_string())
+'''),
+    ("code", '''def cross_model_afs_table(all_metrics, jeff_afs):
+    rows = []
+    if jeff_afs:
+        for task, d in jeff_afs.items():
+            rows.append({"model": "qwen2.5-omni-7b (jeff)", "task": task,
+                         "afs": d.get("afs"), "n_falsifiable": d.get("n_falsifiable")})
+    for model_name, report in all_metrics.items():
+        for task, d in report["attribution_faithfulness"].items():
+            rows.append({"model": model_name, "task": task,
+                         "afs": d.get("afs"), "n_falsifiable": d.get("n_falsifiable")})
+    return pd.DataFrame(rows).pivot(index="task", columns="model", values="afs")
+
+
+afs_tbl = cross_model_afs_table(all_metrics, jeff_afs)
+print("AFS by task (cross-model):")
+print(afs_tbl.round(3).to_string())
+'''),
+    ("markdown", "## Figures — accuracy heatmap, AFS by task, ΔConf by task"),
+    ("code", '''import matplotlib.pyplot as plt
 import numpy as np
+from src.data_utils import TASK_NAME_TO_CODE
 
-from src.metrics import (
-    accuracy_per_task, verbalized_confidence_stats, logprob_confidence_stats,
-    expected_calibration_error, confidence_drop, attribution_faithfulness,
-    transcript_injection_bias, lexical_override_rate, answer_flip_rate,
-)
-"""),
-    ("code", """MODEL = 'qwen'   # change to 'gemma' to analyze the cross-model run
-PRED_DIR = f'results/raw_predictions/{MODEL}'
-METRICS_DIR = f'results/metrics/{MODEL}'
-FIG_DIR = f'results/figures/{MODEL}'
-os.makedirs(METRICS_DIR, exist_ok=True)
+FIG_DIR = os.path.join(RESULTS_DIR, "figures")
 os.makedirs(FIG_DIR, exist_ok=True)
 
-stages = {}
-for stage in ['S0', 'S1', 'S2', 'S3', 'S4', 'S5']:
-    p = f'{PRED_DIR}/{stage}.json'
-    if os.path.exists(p):
-        with open(p) as f:
-            stages[stage] = json.load(f)
-        print(f'Loaded {stage}: {len(stages[stage])} records')
-    else:
-        print(f'MISSING: {stage}')
-"""),
-    ("markdown", "## 1. Accuracy table"),
-    ("code", """acc_table = {s: accuracy_per_task(rs) for s, rs in stages.items()}
-with open(f'{METRICS_DIR}/accuracy_per_task.json', 'w') as f:
-    json.dump(acc_table, f, indent=2)
-
-import pandas as pd
-df = pd.DataFrame(acc_table).T
-print(df.to_string(float_format='%.3f'))
-"""),
-    ("markdown", "## 2. Confidence summaries"),
-    ("code", """conf_table = {}
-ece_table = {}
-for s, rs in stages.items():
-    conf_table[s] = {
-        'verbalized': verbalized_confidence_stats(rs),
-        'logprob': logprob_confidence_stats(rs),
-    }
-    ece_table[s] = {
-        'logprob': expected_calibration_error(rs, source='logprob'),
-        'verbalized': expected_calibration_error(rs, source='verbalized'),
-    }
-
-with open(f'{METRICS_DIR}/confidence.json', 'w') as f:
-    json.dump(conf_table, f, indent=2, default=str)
-with open(f'{METRICS_DIR}/ece.json', 'w') as f:
-    json.dump(ece_table, f, indent=2, default=str)
-
-print('ECE per stage:')
-for s, vals in ece_table.items():
-    print(f'  {s}: logprob={vals["logprob"]:.3f}  verbalized={vals["verbalized"]:.3f}'
-          if vals['logprob'] is not None and vals['verbalized'] is not None else f'  {s}: --')
-"""),
-    ("markdown", "## 3. Confidence Drop under modality ablation"),
-    ("code", """if 'S3' in stages:
-    drops = {}
-    if 'S2' in stages:
-        drops['audio_removal_S3_minus_S2'] = confidence_drop(stages['S3'], stages['S2'], source='verbalized')
-    if 'S1' in stages:
-        drops['visual_removal_S3_minus_S1'] = confidence_drop(stages['S3'], stages['S1'], source='verbalized')
-    with open(f'{METRICS_DIR}/confidence_drops.json', 'w') as f:
-        json.dump(drops, f, indent=2)
-    print(json.dumps(drops, indent=2))
-"""),
-    ("markdown", "## 4. Attribution Faithfulness Score (HEADLINE METRIC)"),
-    ("code", """if {'S1', 'S2', 'S3'}.issubset(stages):
-    afs = attribution_faithfulness(stages['S3'], s2_records=stages['S2'], s1_records=stages['S1'])
-    with open(f'{METRICS_DIR}/attribution_faithfulness.json', 'w') as f:
-        json.dump(afs, f, indent=2)
-    print('Attribution Faithfulness Score per task:')
-    for task, d in afs.items():
-        if d.get('score') is not None:
-            print(f'  {task}: {d["score"]:.2f}  (faithful={d["faithful"]}  confab={d["confabulated"]}  unparsed={d["unparseable"]})')
-"""),
-    ("markdown", "## 5. Transcript Injection Bias and Lexical Override Rate"),
-    ("code", """if 'S3' in stages and 'S4' in stages:
-    tib = transcript_injection_bias(stages['S3'], stages['S4'])
-    with open(f'{METRICS_DIR}/transcript_injection_bias.json', 'w') as f:
-        json.dump(tib, f, indent=2)
-    print('TIB (positive = transcripts hurt):')
-    for t, v in tib.items():
-        print(f'  {t}: {v:+.3f}')
-
-if 'S3' in stages and 'S5' in stages:
-    lor = lexical_override_rate(stages['S3'], stages['S5'])
-    with open(f'{METRICS_DIR}/lexical_override_rate.json', 'w') as f:
-        json.dump(lor, f, indent=2)
-    print('\\nLOR (fraction of S3-correct samples flipped by mismatched transcript):')
-    for t, d in lor.items():
-        if d.get('lor') is not None:
-            print(f'  {t}: {d["lor"]:.2f}  (flipped={d["flipped"]}  stayed={d["stayed"]})')
-"""),
-    ("markdown", "## 6. Answer flip rates"),
-    ("code", """flip_rates = {}
-pairs = [('S3','S2'), ('S3','S1'), ('S3','S4'), ('S3','S5'), ('S3','S0')]
-for a, b in pairs:
-    if a in stages and b in stages:
-        flip_rates[f'{a}_vs_{b}'] = answer_flip_rate(stages[a], stages[b])
-with open(f'{METRICS_DIR}/answer_flip_rates.json', 'w') as f:
-    json.dump(flip_rates, f, indent=2)
-"""),
-    ("markdown", "## 7. Figures"),
-    ("code", """# Accuracy heatmap (stages × tasks)
-import pandas as pd
-df = pd.DataFrame(acc_table).T
-df = df.drop(columns=['OVERALL'], errors='ignore')
-fig, ax = plt.subplots(figsize=(8, 4))
-im = ax.imshow(df.values, cmap='RdYlGn', vmin=0, vmax=1, aspect='auto')
-ax.set_xticks(range(len(df.columns))); ax.set_xticklabels(df.columns)
-ax.set_yticks(range(len(df.index))); ax.set_yticklabels(df.index)
-for i in range(len(df.index)):
-    for j in range(len(df.columns)):
-        v = df.values[i, j]
-        ax.text(j, i, f'{v:.2f}', ha='center', va='center', fontsize=9, color='black')
-plt.colorbar(im, ax=ax, label='Accuracy')
-plt.title(f'{MODEL.upper()} accuracy: stages × tasks')
-plt.tight_layout()
-plt.savefig(f'{FIG_DIR}/accuracy_heatmap.png', dpi=150)
-plt.show()
-"""),
-    ("code", """# AFS bar chart
-if {'S1','S2','S3'}.issubset(stages):
-    tasks_only = [k for k in afs.keys() if k != 'OVERALL']
-    scores = [afs[t]['score'] for t in tasks_only if afs[t]['score'] is not None]
-    labels = [t for t in tasks_only if afs[t]['score'] is not None]
-    fig, ax = plt.subplots(figsize=(7, 4))
-    ax.bar(labels, scores, color='steelblue')
-    ax.axhline(0.5, color='red', linestyle='--', alpha=0.5, label='random / chance')
-    ax.set_ylabel('Attribution Faithfulness Score')
-    ax.set_title(f'{MODEL.upper()}: AFS by task (lower = more confabulation)')
-    ax.set_ylim(0, 1.0)
-    ax.legend()
-    plt.tight_layout()
-    plt.savefig(f'{FIG_DIR}/afs_by_task.png', dpi=150)
+def plot_accuracy_heatmap(report, name):
+    acc = report["accuracy_per_task_per_stage"]
+    stages_order = [s for s in [
+        "S1_text_only","S2_audio_only","S3_visual_only","S4_full_av",
+        "S5_transcript_injected","S6_attribution","S7_mismatched_transcript",
+        "S8_prosody"] if s in acc]
+    tasks_order = list(TASK_NAME_TO_CODE.keys())
+    mat = np.full((len(tasks_order), len(stages_order)), np.nan)
+    for j, stage in enumerate(stages_order):
+        for i, task in enumerate(tasks_order):
+            v = acc.get(stage, {}).get(task, {}).get("accuracy")
+            if v is not None:
+                mat[i, j] = v
+    fig, ax = plt.subplots(figsize=(10, 4))
+    im = ax.imshow(mat, vmin=0.0, vmax=1.0, cmap="viridis", aspect="auto")
+    ax.set_xticks(range(len(stages_order)))
+    ax.set_xticklabels(stages_order, rotation=30, ha="right")
+    ax.set_yticks(range(len(tasks_order)))
+    ax.set_yticklabels([TASK_NAME_TO_CODE[t] for t in tasks_order])
+    for i in range(len(tasks_order)):
+        for j in range(len(stages_order)):
+            if not np.isnan(mat[i, j]):
+                ax.text(j, i, f"{mat[i, j]:.2f}", ha="center", va="center",
+                        color="white" if mat[i, j] < 0.5 else "black",
+                        fontsize=8)
+    plt.colorbar(im, ax=ax, label="accuracy")
+    ax.set_title(f"Accuracy heatmap — {name}")
+    fig.tight_layout()
+    fig.savefig(os.path.join(FIG_DIR, f"accuracy_heatmap_{name}.png"), dpi=140)
     plt.show()
-"""),
-    ("code", """# LOR vs TIB scatter — both measure text/audio trust at the per-task level
-if 'S4' in stages and 'S5' in stages and 'S3' in stages:
-    tasks_in = [t for t in tib if t != 'OVERALL' and lor.get(t, {}).get('lor') is not None]
-    fig, ax = plt.subplots(figsize=(6, 5))
-    for t in tasks_in:
-        ax.scatter(tib[t], lor[t]['lor'], s=80)
-        ax.annotate(t, (tib[t], lor[t]['lor']), xytext=(5,5), textcoords='offset points')
-    ax.axhline(0, color='gray', alpha=0.3)
-    ax.axvline(0, color='gray', alpha=0.3)
-    ax.set_xlabel('TIB = Acc(S3) - Acc(S4)  (>0 = transcripts hurt)')
-    ax.set_ylabel('LOR = fraction flipped by mismatched transcript')
-    ax.set_title(f'{MODEL.upper()}: lexical bias signals by task')
-    plt.tight_layout()
-    plt.savefig(f'{FIG_DIR}/tib_vs_lor.png', dpi=150)
-    plt.show()
-"""),
-    ("markdown", """## What to look for
 
-- **Headline:** Is overall AFS substantially below 1.0? If yes, this is the confabulation finding. Best if AFS varies by task — e.g., HIGH on AIE (where audio is genuinely needed) and LOW on AVCM (where the model can fake it).
-- **Calibration:** Does verbalized confidence saturate near 100? Is logprob ECE > 0.1?
-- **Lexical override:** LOR > 0.2 on audio-essential tasks would be strong evidence the model doesn't trust its own audio encoder.
-- **TIB shape:** Predicted TIB > 0 for ACC/AEL (audio-essential) and TIB < 0 for AVTM (text-helps).
-"""),
+
+for name, report in all_metrics.items():
+    plot_accuracy_heatmap(report, name)
+'''),
+    ("markdown", "Figures saved to `RESULTS_DIR/figures/`. Use them in the paper."),
 ]
 
 
+# ────────────────────────────────────────────────────────────────────
+# Build everything
+# ────────────────────────────────────────────────────────────────────
 def main():
-    write_nb('01_setup_and_download.ipynb', NB_01)
-    write_nb('02_preprocess.ipynb', NB_02)
-    write_nb('03_pilot.ipynb', NB_03)
-    write_nb('04_main_eval_qwen.ipynb', NB_04)
-    write_nb('05_main_eval_gemma.ipynb', NB_05)
-    write_nb('06_analysis.ipynb', NB_06)
+    write_nb("01_setup_and_download.ipynb", NB_01)
+    write_nb("02_preprocess.ipynb", NB_02)
+    write_nb("03_pilot.ipynb", NB_03)
+    write_nb("04_main_eval_gemma.ipynb", NB_04)
+    write_nb("05_main_eval_qwen.ipynb", NB_05)
+    write_nb("06_analysis.ipynb", NB_06)
+    print("\nAll notebooks written.")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
