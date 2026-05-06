@@ -117,13 +117,36 @@ print(f"HF cache:   {HF_CACHE}")
 
 
 INSTALL_DEPS_AV = '''# ─── Install model dependencies ──────────────────────────
-# transformers (Gemma-3n needs a recent build), accelerate, qwen-omni-utils
-# (only loaded when running 05_main_eval_qwen), imageio for frame sampling,
-# soundfile + librosa for audio I/O, openai-whisper for ASR.
-%pip install -q -U "transformers>=4.55.0" accelerate>=0.30 \
-    huggingface-hub>=0.24 imageio[ffmpeg] soundfile librosa scipy
+# transformers (Gemma-3n preview support landed in 4.51), accelerate,
+# soundfile for audio I/O, openai-whisper for ASR. cv2 (opencv-python)
+# is preinstalled on Colab and used for frame sampling.
+%pip install -q -U "transformers>=4.51.0" "accelerate>=0.30" \
+    "huggingface-hub>=0.24" "soundfile>=0.12" scipy
 %pip install -q openai-whisper
-# Qwen-Omni preview branch is only needed for notebook 05; install when running it.
+# Qwen-Omni preview branch is only needed for notebook 05; install there.
+
+# Gemma-3n is GATED on HuggingFace — you must accept the license at
+# https://huggingface.co/google/gemma-3n-E2B-it and authenticate.
+# In Colab: Tools → Secrets → add HF_TOKEN, then:
+import os
+if "HF_TOKEN" in os.environ or "HUGGINGFACE_TOKEN" in os.environ:
+    from huggingface_hub import login
+    login(token=os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN"))
+    print("HF authenticated")
+else:
+    try:
+        from google.colab import userdata
+        tok = userdata.get("HF_TOKEN")
+        if tok:
+            from huggingface_hub import login
+            login(token=tok)
+            print("HF authenticated (from Colab Secrets)")
+        else:
+            print("WARN: no HF_TOKEN — Gemma-3n download will fail. "
+                  "Add HF_TOKEN to Colab Secrets first.")
+    except Exception:
+        print("WARN: not in Colab and no HF_TOKEN env var. "
+              "Run `huggingface-cli login` before loading Gemma.")
 '''
 
 
@@ -281,7 +304,7 @@ for i, s in enumerate(samples, 1):
     if strip_audio(video, silent_out):
         stats["silent_ok"] += 1
     if i % 50 == 0:
-        print(f"  [{i}/{len(samples)}] audio={stats[\\'audio_ok\\']} silent={stats[\\'silent_ok\\']}")
+        print(f"  [{i}/{len(samples)}] audio={stats['audio_ok']} silent={stats['silent_ok']}")
 print(stats)
 '''),
     ("markdown", "## Whisper transcripts (small)"),
@@ -387,7 +410,7 @@ for stage in PILOT_STAGES:
             row = fn(gemma, s, get_paths(s))
             pilot_results[stage].append(row)
         except Exception as e:
-            print(f"  ✗ {stage} qa_id={s[\\'qa_id\\']}: {e}")
+            print(f"  ✗ {stage} qa_id={s['qa_id']}: {e}")
     valid = sum(1 for r in pilot_results[stage] if r.get("predicted_answer"))
     print(f"  {stage}: {valid}/{len(pilot)} parseable")
 '''),
@@ -398,7 +421,7 @@ for stage, per_task in acc.items():
     print(f"\\n{stage}:")
     for task, d in per_task.items():
         if d.get("accuracy") is not None:
-            print(f"  {task:35s} {d[\\'accuracy\\']:.2f} ({d[\\'n_correct\\']}/{d[\\'n_valid\\']})")
+            print(f"  {task:35s} {d['accuracy']:.2f} ({d['n_correct']}/{d['n_valid']})")
 '''),
     ("markdown", "If everything looks right above, proceed to `04_main_eval_gemma.ipynb`."),
 ]
@@ -665,19 +688,19 @@ for run_dir in model_runs:
     for stage in sorted(acc.keys()):
         ov = acc[stage].get("OVERALL", {})
         if ov.get("accuracy") is not None:
-            print(f"  {stage:30s} {ov[\\'accuracy\\']:.3f}")
+            print(f"  {stage:30s} {ov['accuracy']:.3f}")
     afs_o = report["attribution_faithfulness"].get("OVERALL", {})
     if afs_o:
-        print(f"\\nAFS overall: {afs_o.get(\\'afs\\')}  "
-              f"(F={afs_o.get(\\'faithful\\')}, C={afs_o.get(\\'confabulated\\')}, "
-              f"T={afs_o.get(\\'trivial\\')}, U={afs_o.get(\\'unparseable\\')})")
+        print(f"\\nAFS overall: {afs_o.get('afs')}  "
+              f"(F={afs_o.get('faithful')}, C={afs_o.get('confabulated')}, "
+              f"T={afs_o.get('trivial')}, U={afs_o.get('unparseable')})")
     lor_o = report["lexical_override_rate"].get("OVERALL", {})
     if lor_o:
-        print(f"LOR overall: {lor_o.get(\\'lor\\')}  "
-              f"(flipped={lor_o.get(\\'flipped\\')}, stayed={lor_o.get(\\'stayed\\')})")
+        print(f"LOR overall: {lor_o.get('lor')}  "
+              f"(flipped={lor_o.get('flipped')}, stayed={lor_o.get('stayed')})")
     tib_overall = report["transcript_injection_bias"].get("OVERALL", {})
     if tib_overall:
-        print(f"TIB overall: {tib_overall.get(\\'tib\\')}")
+        print(f"TIB overall: {tib_overall.get('tib')}")
 
 
 for name, report in all_metrics.items():

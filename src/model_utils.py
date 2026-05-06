@@ -95,38 +95,40 @@ def _load_audio_array(audio_path: str, target_sr: int = 16000,
 def _sample_video_frames(video_path: str, num_frames: int = 8):
     """Sample evenly-spaced frames from a video as a list of PIL Images.
 
-    Uses imageio.v3 (ffmpeg-based) for portability; works on Colab.
+    Uses OpenCV (preinstalled on Colab); reliable across mp4 codecs.
+    Falls back gracefully to whatever frames it can read.
     """
     import numpy as np
     from PIL import Image
-    import imageio.v3 as iio
+    import cv2
 
-    # Read all frames lazily; for short AVUT clips this is cheap.
-    # For longer videos, we'd want a proper time-based sampler.
-    frames = []
-    metadata = iio.immeta(video_path, plugin="pyav")
-    duration = metadata.get("duration")
-    fps = metadata.get("fps")
-    total_frames = int(duration * fps) if (duration and fps) else None
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return [Image.new("RGB", (224, 224))]
 
-    if total_frames and total_frames > 0:
-        # Evenly spaced indices
-        idxs = np.linspace(0, total_frames - 1, num=num_frames).astype(int).tolist()
-        # Read one frame per index
-        for idx in idxs:
-            try:
-                arr = iio.imread(video_path, index=idx, plugin="pyav")
-                frames.append(Image.fromarray(arr))
-            except Exception:
-                continue
-
-    if not frames:
-        # Fallback: read up to num_frames from the start
-        for i, arr in enumerate(iio.imiter(video_path, plugin="pyav")):
-            frames.append(Image.fromarray(arr))
-            if len(frames) >= num_frames:
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    if total <= 0:
+        # Some codecs don't report frame count; read sequentially up to num_frames
+        frames = []
+        while len(frames) < num_frames:
+            ok, bgr = cap.read()
+            if not ok:
                 break
+            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            frames.append(Image.fromarray(rgb))
+        cap.release()
+        return frames or [Image.new("RGB", (224, 224))]
 
+    idxs = np.linspace(0, max(total - 1, 0), num=num_frames).astype(int).tolist()
+    frames = []
+    for idx in idxs:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
+        ok, bgr = cap.read()
+        if not ok:
+            continue
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        frames.append(Image.fromarray(rgb))
+    cap.release()
     return frames or [Image.new("RGB", (224, 224))]
 
 
@@ -313,8 +315,19 @@ class Gemma3nWrapper:
             return_dict=True,
             return_tensors="pt",
         )
-        inputs = {k: (v.to(self.model.device) if hasattr(v, "to") else v)
-                  for k, v in inputs.items()}
+        # Move to model device. Cast float tensors to model.dtype (bf16) so
+        # audio_input_features / pixel_values match the encoders' weights;
+        # leave int tensors (input_ids, attention_mask) on int.
+        moved = {}
+        for k, v in inputs.items():
+            if not hasattr(v, "to"):
+                moved[k] = v
+                continue
+            if torch.is_floating_point(v):
+                moved[k] = v.to(self.model.device, dtype=self.model.dtype)
+            else:
+                moved[k] = v.to(self.model.device)
+        inputs = moved
 
         with torch.no_grad():
             out_ids = self.model.generate(
