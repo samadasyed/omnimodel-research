@@ -1,0 +1,226 @@
+{
+  "S1_text_only": {
+    "Audio Content Counting": {
+      "correlation": -0.2856646653450325,
+      "p_value": 0.00396388063538617,
+      "n": 100
+    },
+    "Audio Event Location": {
+      "correlation": 0.02768890003737663,
+      "p_value": 0.7844994449058285,
+      "n": 100
+    },
+    "Audio Information Extraction": {
+      "correlation": -0.060522753266880225,
+      "p_value": 0.5497284678484642,
+      "n": 100
+    },
+    "Audio Character Matching": {
+      "correlation": 0.17360483211470368,
+      "p_value": 0.08410226905027389,
+      "n": 100
+    },
+    "Audio Object Matching": {
+      "correlation": 0.049177388762997244,
+      "p_value": 0.6288208682151946,
+      "n": 99
+    },
+    "Audio OCR Matching": {
+      "correlation": 0.08179478891246064,
+      "p_value": 0.418503003149848,
+      "n": 100
+    }
+  },
+  "S2_audio_only": {
+    "Audio Content Counting": {
+      "correlation": 0.0945824226342289,
+      "p_value": 0.34925598404587554,
+      "n": 100
+    },
+    "Audio Event Location": {
+      "correlation": 0.07945006856303256,
+      "p_value": 0.4343819193501387,
+      "n": 99
+    },
+    "Audio Information Extraction": {
+      "correlation": 0.2839702531559795,
+      "p_value": 0.004193973899895013,
+      "n": 100
+    },
+    "Audio Character Matching": {
+      "correlation": -0.08200476856407696,
+      "p_value": 0.4270247471614484,
+      "n": 96
+    },
+    "Audio Object Matching": {
+      "correlation": 0.14404085481953668,
+      "p_value": 0.15490554149847804,
+      "n": 99
+    },
+    "Audio OCR Matching": {
+      "correlation": 0.12249059360849936,
+      "p_value": 0.22710813878776795,
+      "n": 99
+    }
+  },
+  "S3_visual_only": {
+    "Audio Content Counting": {
+      "correlation": -0.0294263167624408,
+      "p_value": 0.7713369975785468,
+      "n": 100
+    },
+    "Audio Event Location": {
+      "correlation": 0.036374154641918184,
+      "p_value": 0.7193801373914277,
+      "n": 100
+    },
+    "Audio Information Extraction": {
+      "correlation": 0.11451740551793473,
+      "p_value": 0.2565792993322773,
+      "n": 100
+    },
+    "Audio Character Matching": {
+      "correlation": 0.07836976593158859,
+      "p_value": 0.43831737395186987,
+      "n": 100
+    },
+    "Audio Object Matching": {
+      "correlation": 0.021967168160240143,
+      "p_value": 0.8282581991860613,
+      "n": 100
+    },
+    "Audio OCR Matching": {
+      "correlation": 0.2628894992543475,
+      "p_value": 0.00856591553522937,
+      "n": 99
+    }
+  },
+  "S4_full_av": {
+    "Audio Content Counting": {
+      "correlation": -0.03233065197374887,
+      "p_value": 0.7494798873843089,
+      "n": 100
+    },
+    "Audio Event Location": {
+      "correlation": -0.06834718724769397,
+      "p_value": 0.4992504032179306,
+      "n": 100
+    },
+    "Audio Information Extraction": {
+      "correlation": 0.22303450984636553,
+      "p_value": 0.02571560584257884,
+      "n": 100
+    },
+    "Audio Character Matching": {
+      "correlation": -0.1594669197878406,
+      "p_value": 0.11301642708934606,
+      "n": 100
+    },
+    "Audio Object Matching": {
+      "correlation": 0.08168614462414983,
+      "p_value": 0.41912344514833616,
+      "n": 100
+    },
+    "Audio OCR Matching": {
+      "correlation": 0.09597148699373928,
+      "p_value": 0.34467916799869186,
+      "n": 99
+    }
+  },
+  "S5_transcript_injected": {
+    "Audio Content Counting": {
+      "correlation": 0.015154444169144165,
+      "p_value": 0.8810425490604037,
+      "n": 100
+    },
+    "Audio Event Location": {
+      "correlation": 0.024955436720142585,
+      "p_value": 0.8053298609995265,
+      "n": 100
+    },
+    "Audio Information Extraction": {
+      "correlation": 0.24537778637024799,
+      "p_value": 0.01386773524483582,
+      "n": 100
+    },
+    "Audio Character Matching": {
+      "correlation": -0.13193885226541166,
+      "p_value": 0.19069391366018798,
+      "n": 100
+    },
+    "Audio Object Matching": {
+      "correlation": 0.12912703906965792,
+      "p_value": 0.20040315835929481,
+      "n": 100
+    },
+    "Audio OCR Matching": {
+      "correlation": 0.11493025678688151,
+      "p_value": 0.257308050744551,
+      "n": 99
+    }
+  },
+  "S6_attribution": {
+    "Audio Content Counting": {
+      "correlation": -0.03233065197374887,
+      "p_value": 0.7494798873843089,
+      "n": 100
+    },
+    "Audio Event Location": {
+      "correlation": -0.06834718724769397,
+      "p_value": 0.4992504032179306,
+      "n": 100
+    },
+    "Audio Information Extraction": {
+      "correlation": 0.22303450984636553,
+      "p_value": 0.02571560584257884,
+      "n": 100
+    },
+    "Audio Character Matching": {
+      "correlation": -0.1594669197878406,
+      "p_value": 0.11301642708934606,
+      "n": 100
+    },
+    "Audio Object Matching": {
+      "correlation": 0.08168614462414983,
+      "p_value": 0.41912344514833616,
+      "n": 100
+    },
+    "Audio OCR Matching": {
+      "correlation": 0.09597148699373928,
+      "p_value": 0.34467916799869186,
+      "n": 99
+    }
+  },
+  "S7_mismatched_transcript": {
+    "Audio Content Counting": {
+      "correlation": 0.04618347240494175,
+      "p_value": 0.6481944638732507,
+      "n": 100
+    },
+    "Audio Event Location": {
+      "correlation": 0.01137637532100401,
+      "p_value": 0.911014080724576,
+      "n": 99
+    },
+    "Audio Information Extraction": {
+      "correlation": 0.15689357268247972,
+      "p_value": 0.11902446992007551,
+      "n": 100
+    },
+    "Audio Character Matching": {
+      "correlation": -0.07498412311489468,
+      "p_value": 0.45841542537418023,
+      "n": 100
+    },
+    "Audio Object Matching": {
+      "correlation": 0.14855627054164153,
+      "p_value": 0.14019004692175827,
+      "n": 100
+    },
+    "Audio OCR Matching": {
+      "correlation": 0.011794452320588938,
+      "p_value": 0.9077580119790425,
+      "n": 99
+    }
+  }
+}

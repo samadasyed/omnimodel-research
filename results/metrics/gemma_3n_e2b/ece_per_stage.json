@@ -1,0 +1,9 @@
+{
+  "S1_text_only": 0.6709515859766277,
+  "S2_audio_only": 0.5450252951096121,
+  "S3_visual_only": 0.5034390651085141,
+  "S4_full_av": 0.4665776293823038,
+  "S5_transcript_injected": 0.4501669449081803,
+  "S6_attribution": 0.4665776293823038,
+  "S7_mismatched_transcript": 0.498227424749164
+}

@@ -1,0 +1,268 @@
+{
+  "S1_text_only": {
+    "Audio Content Counting": {
+      "mean": 92.5,
+      "std": 3.295236844080537,
+      "n_valid": 100,
+      "n_total": 100
+    },
+    "Audio Event Location": {
+      "mean": 94.4,
+      "std": 4.56601410953633,
+      "n_valid": 100,
+      "n_total": 100
+    },
+    "Audio Information Extraction": {
+      "mean": 95.5,
+      "std": 1.8118576883486968,
+      "n_valid": 100,
+      "n_total": 100
+    },
+    "Audio Character Matching": {
+      "mean": 95,
+      "std": 0.7106690545187014,
+      "n_valid": 100,
+      "n_total": 100
+    },
+    "Audio Object Matching": {
+      "mean": 94.74747474747475,
+      "std": 7.77140682027344,
+      "n_valid": 99,
+      "n_total": 100
+    },
+    "Audio OCR Matching": {
+      "mean": 95.7,
+      "std": 2.3591643786850813,
+      "n_valid": 100,
+      "n_total": 100
+    }
+  },
+  "S2_audio_only": {
+    "Audio Content Counting": {
+      "mean": 97.1,
+      "std": 10.327466565260119,
+      "n_valid": 100,
+      "n_total": 100
+    },
+    "Audio Event Location": {
+      "mean": 97.3,
+      "std": 2.879744657591935,
+      "n_valid": 100,
+      "n_total": 100
+    },
+    "Audio Information Extraction": {
+      "mean": 97.35,
+      "std": 5.705526295008227,
+      "n_valid": 100,
+      "n_total": 100
+    },
+    "Audio Character Matching": {
+      "mean": 97,
+      "std": 3.097734590948617,
+      "n_valid": 100,
+      "n_total": 100
+    },
+    "Audio Object Matching": {
+      "mean": 96.7,
+      "std": 3.1956409704660524,
+      "n_valid": 100,
+      "n_total": 100
+    },
+    "Audio OCR Matching": {
+      "mean": 97.7,
+      "std": 2.79067711996189,
+      "n_valid": 100,
+      "n_total": 100
+    }
+  },
+  "S3_visual_only": {
+    "Audio Content Counting": {
+      "mean": 92.36,
+      "std": 14.401543127194545,
+      "n_valid": 100,
+      "n_total": 100
+    },
+    "Audio Event Location": {
+      "mean": 93.3,
+      "std": 3.568945745927463,
+      "n_valid": 100,
+      "n_total": 100
+    },
+    "Audio Information Extraction": {
+      "mean": 90.55,
+      "std": 11.434817467063063,
+      "n_valid": 100,
+      "n_total": 100
+    },
+    "Audio Character Matching": {
+      "mean": 94.9,
+      "std": 1.4177803109441922,
+      "n_valid": 100,
+      "n_total": 100
+    },
+    "Audio Object Matching": {
+      "mean": 93.6,
+      "std": 6.593538312222617,
+      "n_valid": 100,
+      "n_total": 100
+    },
+    "Audio OCR Matching": {
+      "mean": 95.3,
+      "std": 3.0,
+      "n_valid": 100,
+      "n_total": 100
+    }
+  },
+  "S4_full_av": {
+    "Audio Content Counting": {
+      "mean": 95.74,
+      "std": 10.362734321898957,
+      "n_valid": 100,
+      "n_total": 100
+    },
+    "Audio Event Location": {
+      "mean": 96,
+      "std": 2.1320071635561044,
+      "n_valid": 100,
+      "n_total": 100
+    },
+    "Audio Information Extraction": {
+      "mean": 97.34,
+      "std": 2.9617766985580145,
+      "n_valid": 100,
+      "n_total": 100
+    },
+    "Audio Character Matching": {
+      "mean": 96.75,
+      "std": 2.3968624272055115,
+      "n_valid": 100,
+      "n_total": 100
+    },
+    "Audio Object Matching": {
+      "mean": 96.15,
+      "std": 2.2309802166923682,
+      "n_valid": 100,
+      "n_total": 100
+    },
+    "Audio OCR Matching": {
+      "mean": 97.85,
+      "std": 2.487849259781215,
+      "n_valid": 100,
+      "n_total": 100
+    }
+  },
+  "S5_transcript_injected": {
+    "Audio Content Counting": {
+      "mean": 99.2,
+      "std": 1.9745860069872618,
+      "n_valid": 100,
+      "n_total": 100
+    },
+    "Audio Event Location": {
+      "mean": 98.3,
+      "std": 2.3804761428476167,
+      "n_valid": 100,
+      "n_total": 100
+    },
+    "Audio Information Extraction": {
+      "mean": 98.85,
+      "std": 2.2309802166923682,
+      "n_valid": 100,
+      "n_total": 100
+    },
+    "Audio Character Matching": {
+      "mean": 98,
+      "std": 2.461829819586655,
+      "n_valid": 100,
+      "n_total": 100
+    },
+    "Audio Object Matching": {
+      "mean": 96.55,
+      "std": 2.4303427035226237,
+      "n_valid": 100,
+      "n_total": 100
+    },
+    "Audio OCR Matching": {
+      "mean": 98.7,
+      "std": 2.2042200113840402,
+      "n_valid": 100,
+      "n_total": 100
+    }
+  },
+  "S6_attribution": {
+    "Audio Content Counting": {
+      "mean": 95.74,
+      "std": 10.362734321898957,
+      "n_valid": 100,
+      "n_total": 100
+    },
+    "Audio Event Location": {
+      "mean": 96,
+      "std": 2.1320071635561044,
+      "n_valid": 100,
+      "n_total": 100
+    },
+    "Audio Information Extraction": {
+      "mean": 97.34,
+      "std": 2.9617766985580145,
+      "n_valid": 100,
+      "n_total": 100
+    },
+    "Audio Character Matching": {
+      "mean": 96.75,
+      "std": 2.3968624272055115,
+      "n_valid": 100,
+      "n_total": 100
+    },
+    "Audio Object Matching": {
+      "mean": 96.15,
+      "std": 2.2309802166923682,
+      "n_valid": 100,
+      "n_total": 100
+    },
+    "Audio OCR Matching": {
+      "mean": 97.85,
+      "std": 2.487849259781215,
+      "n_valid": 100,
+      "n_total": 100
+    }
+  },
+  "S7_mismatched_transcript": {
+    "Audio Content Counting": {
+      "mean": 97.54,
+      "std": 8.927791134735095,
+      "n_valid": 100,
+      "n_total": 100
+    },
+    "Audio Event Location": {
+      "mean": 97.75,
+      "std": 2.5,
+      "n_valid": 100,
+      "n_total": 100
+    },
+    "Audio Information Extraction": {
+      "mean": 97.85,
+      "std": 3.276407863018352,
+      "n_valid": 100,
+      "n_total": 100
+    },
+    "Audio Character Matching": {
+      "mean": 97.85,
+      "std": 2.5873624493766707,
+      "n_valid": 100,
+      "n_total": 100
+    },
+    "Audio Object Matching": {
+      "mean": 96.5,
+      "std": 2.706147136286629,
+      "n_valid": 100,
+      "n_total": 100
+    },
+    "Audio OCR Matching": {
+      "mean": 98.4,
+      "std": 2.449489742783178,
+      "n_valid": 100,
+      "n_total": 100
+    }
+  }
+}

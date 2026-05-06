@@ -1,5 +1,8 @@
 /agentdocs
 
+# Claude Code project-local state
+.claude/
+
 # Data — never commit raw videos, audio, or transcripts (large + redistributable from source)
 data/videos/
 data/audio/

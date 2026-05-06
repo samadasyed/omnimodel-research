@@ -1,0 +1,76 @@
+{
+  "Audio Content Counting": {
+    "afs": 0.66,
+    "n_falsifiable": 50,
+    "faithful": 33,
+    "confabulated": 17,
+    "unparseable": 0,
+    "trivial": 50,
+    "claimed_audio": 99,
+    "claimed_visual": 1,
+    "claimed_text": 0
+  },
+  "Audio Event Location": {
+    "afs": 0.627906976744186,
+    "n_falsifiable": 43,
+    "faithful": 27,
+    "confabulated": 16,
+    "unparseable": 0,
+    "trivial": 57,
+    "claimed_audio": 100,
+    "claimed_visual": 0,
+    "claimed_text": 0
+  },
+  "Audio Information Extraction": {
+    "afs": 0.7017543859649122,
+    "n_falsifiable": 57,
+    "faithful": 40,
+    "confabulated": 17,
+    "unparseable": 0,
+    "trivial": 43,
+    "claimed_audio": 99,
+    "claimed_visual": 1,
+    "claimed_text": 0
+  },
+  "Audio Character Matching": {
+    "afs": 0.34782608695652173,
+    "n_falsifiable": 69,
+    "faithful": 24,
+    "confabulated": 45,
+    "unparseable": 0,
+    "trivial": 31,
+    "claimed_audio": 97,
+    "claimed_visual": 3,
+    "claimed_text": 0
+  },
+  "Audio Object Matching": {
+    "afs": 0.3090909090909091,
+    "n_falsifiable": 55,
+    "faithful": 17,
+    "confabulated": 38,
+    "unparseable": 0,
+    "trivial": 45,
+    "claimed_audio": 99,
+    "claimed_visual": 1,
+    "claimed_text": 0
+  },
+  "Audio OCR Matching": {
+    "afs": 0.4,
+    "n_falsifiable": 60,
+    "faithful": 24,
+    "confabulated": 36,
+    "unparseable": 1,
+    "trivial": 39,
+    "claimed_audio": 98,
+    "claimed_visual": 2,
+    "claimed_text": 0
+  },
+  "OVERALL": {
+    "afs": 0.4940119760479042,
+    "n_falsifiable": 334,
+    "faithful": 165,
+    "confabulated": 169,
+    "unparseable": 1,
+    "trivial": 265
+  }
+}

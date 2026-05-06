@@ -1,0 +1,44 @@
+{
+  "Audio Content Counting": {
+    "lor": 0.2857142857142857,
+    "flipped": 10,
+    "stayed": 25,
+    "skipped_s4_wrong": 65
+  },
+  "Audio Event Location": {
+    "lor": 0.16666666666666666,
+    "flipped": 6,
+    "stayed": 30,
+    "skipped_s4_wrong": 63
+  },
+  "Audio Information Extraction": {
+    "lor": 0.1095890410958904,
+    "flipped": 8,
+    "stayed": 65,
+    "skipped_s4_wrong": 27
+  },
+  "Audio Character Matching": {
+    "lor": 0.14583333333333334,
+    "flipped": 7,
+    "stayed": 41,
+    "skipped_s4_wrong": 52
+  },
+  "Audio Object Matching": {
+    "lor": 0.16981132075471697,
+    "flipped": 9,
+    "stayed": 44,
+    "skipped_s4_wrong": 47
+  },
+  "Audio OCR Matching": {
+    "lor": 0.16363636363636364,
+    "flipped": 9,
+    "stayed": 46,
+    "skipped_s4_wrong": 44
+  },
+  "OVERALL": {
+    "lor": 0.16333333333333333,
+    "flipped": 49,
+    "stayed": 251,
+    "skipped_s4_wrong": 298
+  }
+}

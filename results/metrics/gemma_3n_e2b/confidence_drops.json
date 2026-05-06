@@ -1,0 +1,18 @@
+{
+  "audio_removal": {
+    "Audio Content Counting": 3.3799999999999955,
+    "Audio Event Location": 2.700000000000003,
+    "Audio Information Extraction": 6.790000000000006,
+    "Audio Character Matching": 1.8499999999999943,
+    "Audio Object Matching": 2.5500000000000114,
+    "Audio OCR Matching": 2.549999999999997
+  },
+  "visual_removal": {
+    "Audio Content Counting": -1.3599999999999994,
+    "Audio Event Location": -1.2999999999999972,
+    "Audio Information Extraction": -0.009999999999990905,
+    "Audio Character Matching": -0.25,
+    "Audio Object Matching": -0.5499999999999972,
+    "Audio OCR Matching": 0.14999999999999147
+  }
+}

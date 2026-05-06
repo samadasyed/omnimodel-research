@@ -1,0 +1,187 @@
+{
+  "remove_audio": {
+    "overall": 0.27212020033388984,
+    "n_flips": 163,
+    "n_total": 599,
+    "per_task": {
+      "Audio Object Matching": {
+        "rate": 0.17,
+        "n_flips": 17,
+        "n_total": 100
+      },
+      "Audio OCR Matching": {
+        "rate": 0.24242424242424243,
+        "n_flips": 24,
+        "n_total": 99
+      },
+      "Audio Content Counting": {
+        "rate": 0.33,
+        "n_flips": 33,
+        "n_total": 100
+      },
+      "Audio Character Matching": {
+        "rate": 0.21,
+        "n_flips": 21,
+        "n_total": 100
+      },
+      "Audio Information Extraction": {
+        "rate": 0.41,
+        "n_flips": 41,
+        "n_total": 100
+      },
+      "Audio Event Location": {
+        "rate": 0.27,
+        "n_flips": 27,
+        "n_total": 100
+      }
+    }
+  },
+  "remove_visual": {
+    "overall": 0.3777403035413153,
+    "n_flips": 224,
+    "n_total": 593,
+    "per_task": {
+      "Audio Object Matching": {
+        "rate": 0.48484848484848486,
+        "n_flips": 48,
+        "n_total": 99
+      },
+      "Audio OCR Matching": {
+        "rate": 0.43434343434343436,
+        "n_flips": 43,
+        "n_total": 99
+      },
+      "Audio Content Counting": {
+        "rate": 0.33,
+        "n_flips": 33,
+        "n_total": 100
+      },
+      "Audio Character Matching": {
+        "rate": 0.5833333333333334,
+        "n_flips": 56,
+        "n_total": 96
+      },
+      "Audio Information Extraction": {
+        "rate": 0.22,
+        "n_flips": 22,
+        "n_total": 100
+      },
+      "Audio Event Location": {
+        "rate": 0.2222222222222222,
+        "n_flips": 22,
+        "n_total": 99
+      }
+    }
+  },
+  "add_transcript": {
+    "overall": 0.22537562604340566,
+    "n_flips": 135,
+    "n_total": 599,
+    "per_task": {
+      "Audio Object Matching": {
+        "rate": 0.18,
+        "n_flips": 18,
+        "n_total": 100
+      },
+      "Audio OCR Matching": {
+        "rate": 0.2222222222222222,
+        "n_flips": 22,
+        "n_total": 99
+      },
+      "Audio Content Counting": {
+        "rate": 0.33,
+        "n_flips": 33,
+        "n_total": 100
+      },
+      "Audio Character Matching": {
+        "rate": 0.17,
+        "n_flips": 17,
+        "n_total": 100
+      },
+      "Audio Information Extraction": {
+        "rate": 0.22,
+        "n_flips": 22,
+        "n_total": 100
+      },
+      "Audio Event Location": {
+        "rate": 0.23,
+        "n_flips": 23,
+        "n_total": 100
+      }
+    }
+  },
+  "mismatched_transcript": {
+    "overall": 0.205685618729097,
+    "n_flips": 123,
+    "n_total": 598,
+    "per_task": {
+      "Audio Object Matching": {
+        "rate": 0.2,
+        "n_flips": 20,
+        "n_total": 100
+      },
+      "Audio OCR Matching": {
+        "rate": 0.18181818181818182,
+        "n_flips": 18,
+        "n_total": 99
+      },
+      "Audio Content Counting": {
+        "rate": 0.3,
+        "n_flips": 30,
+        "n_total": 100
+      },
+      "Audio Character Matching": {
+        "rate": 0.23,
+        "n_flips": 23,
+        "n_total": 100
+      },
+      "Audio Information Extraction": {
+        "rate": 0.12,
+        "n_flips": 12,
+        "n_total": 100
+      },
+      "Audio Event Location": {
+        "rate": 0.20202020202020202,
+        "n_flips": 20,
+        "n_total": 99
+      }
+    }
+  },
+  "to_text_only": {
+    "overall": 0.6460767946577629,
+    "n_flips": 387,
+    "n_total": 599,
+    "per_task": {
+      "Audio Object Matching": {
+        "rate": 0.65,
+        "n_flips": 65,
+        "n_total": 100
+      },
+      "Audio OCR Matching": {
+        "rate": 0.7575757575757576,
+        "n_flips": 75,
+        "n_total": 99
+      },
+      "Audio Content Counting": {
+        "rate": 0.53,
+        "n_flips": 53,
+        "n_total": 100
+      },
+      "Audio Character Matching": {
+        "rate": 0.72,
+        "n_flips": 72,
+        "n_total": 100
+      },
+      "Audio Information Extraction": {
+        "rate": 0.66,
+        "n_flips": 66,
+        "n_total": 100
+      },
+      "Audio Event Location": {
+        "rate": 0.56,
+        "n_flips": 56,
+        "n_total": 100
+      }
+    }
+  }
+}

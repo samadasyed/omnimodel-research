@@ -1,0 +1,37 @@
+{
+  "Audio Content Counting": {
+    "tib": 0.019999999999999962,
+    "s4_accuracy": 0.35,
+    "s5_accuracy": 0.33
+  },
+  "Audio Event Location": {
+    "tib": 0.02999999999999997,
+    "s4_accuracy": 0.37,
+    "s5_accuracy": 0.34
+  },
+  "Audio Information Extraction": {
+    "tib": -0.13,
+    "s4_accuracy": 0.73,
+    "s5_accuracy": 0.86
+  },
+  "Audio Character Matching": {
+    "tib": -0.08999999999999997,
+    "s4_accuracy": 0.48,
+    "s5_accuracy": 0.57
+  },
+  "Audio Object Matching": {
+    "tib": 0.050000000000000044,
+    "s4_accuracy": 0.53,
+    "s5_accuracy": 0.48
+  },
+  "Audio OCR Matching": {
+    "tib": -0.06060606060606055,
+    "s4_accuracy": 0.5555555555555556,
+    "s5_accuracy": 0.6161616161616161
+  },
+  "OVERALL": {
+    "tib": -0.03005008347245408,
+    "s4_accuracy": 0.5025041736227045,
+    "s5_accuracy": 0.5325542570951586
+  }
+}
